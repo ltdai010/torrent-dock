@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -14,13 +14,29 @@ import {
   ShieldCheck,
   Upload
 } from "lucide-react";
-import { selectedFiles, torrentSummaries } from "./data/mockTorrents";
-import type { TorrentFile } from "./domain/torrent";
+import {
+  getStreamUrl,
+  isSupportedTorrentSource,
+  resolveTorrentMetadata,
+  RqbitApiError,
+  startTorrentDownload,
+  type RqbitFile
+} from "./services/rqbit";
 
-type MetadataState = "idle" | "fetching" | "ready" | "error";
+type MetadataState = "idle" | "fetching" | "ready" | "starting" | "streaming" | "error";
+
+type TorrentSession = {
+  infoHash: string;
+  name: string;
+  files: RqbitFile[];
+  seenPeers: number;
+  torrentId?: number;
+};
 
 const defaultInput =
-  "magnet:?xt=urn:btih:e03ec1fdc28f72a6ef2c3a90dcd24a884e987125&dn=Creative%20Commons%20Space%20Documentary";
+  "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&ws=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2F&xs=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2Fbig-buck-bunny.torrent";
+
+const playableExtensions = new Set([".avi", ".m4v", ".mkv", ".mov", ".mp4", ".ogg", ".ogm", ".ogv", ".webm"]);
 
 function formatBytes(bytes: number) {
   if (bytes === 0) {
@@ -33,58 +49,167 @@ function formatBytes(bytes: number) {
   return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
-function formatRate(bytesPerSecond: number) {
-  return `${formatBytes(bytesPerSecond)}/s`;
+function getFileName(file: RqbitFile) {
+  return file.components.length > 0 ? file.components[file.components.length - 1] : file.name.split("/").slice(-1)[0];
 }
 
-function getFileName(file: TorrentFile) {
-  return file.path.split("/").slice(-1)[0];
+function isPlayable(file: RqbitFile) {
+  const fileName = getFileName(file).toLowerCase();
+  return Array.from(playableExtensions).some((extension) => fileName.endsWith(extension));
+}
+
+function getErrorMessage(error: unknown) {
+  if (error instanceof RqbitApiError) {
+    if (error.status === 404) {
+      return "rqbit is not responding. Start Docker dev services, then retry.";
+    }
+
+    return error.message || "Torrent engine rejected the source.";
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return "Something went wrong while talking to the torrent engine.";
 }
 
 function App() {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const [torrentInput, setTorrentInput] = useState(defaultInput);
-  const [metadataState, setMetadataState] = useState<MetadataState>("ready");
+  const [metadataState, setMetadataState] = useState<MetadataState>("idle");
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
+  const [session, setSession] = useState<TorrentSession | null>(null);
+  const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const activeTorrent = torrentSummaries.find((torrent) => torrent.id === "cc-space-film");
-  const playableFiles = selectedFiles.filter((file) => file.mediaKind === "video");
+  const playableFiles = useMemo(() => session?.files.filter(isPlayable) ?? [], [session]);
   const selectedFile = playableFiles[selectedFileIndex] ?? playableFiles[0];
 
   const metadataStatus = useMemo(() => {
     if (metadataState === "fetching") {
-      return "Fetching metadata from trackers, DHT, and peers...";
+      return "Resolving metadata through the local torrent engine...";
+    }
+
+    if (metadataState === "starting") {
+      return "Starting the selected file and preparing a local stream URL...";
+    }
+
+    if (metadataState === "streaming") {
+      return "Local stream is ready. Use the video controls to play or seek.";
     }
 
     if (metadataState === "ready") {
-      return "Metadata ready. Select a file and press play.";
+      return "Metadata ready. Select a playable file and press play.";
     }
 
     if (metadataState === "error") {
-      return "Could not read that link. Edit it and try again.";
+      return errorMessage ?? "Could not read that link. Edit it and try again.";
     }
 
     return "Paste a magnet link or torrent URL to begin.";
-  }, [metadataState]);
+  }, [errorMessage, metadataState]);
 
-  function pullMetadata() {
+  async function pullMetadata() {
     const normalizedInput = torrentInput.trim();
 
-    if (!normalizedInput) {
+    setStreamUrl(null);
+    setIsPlaying(false);
+    setErrorMessage(null);
+
+    if (!normalizedInput || !isSupportedTorrentSource(normalizedInput)) {
       setMetadataState("error");
-      setIsPlaying(false);
+      setSession(null);
+      setErrorMessage("Paste a valid magnet URI, torrent URL, or direct HTTP(S) torrent source.");
+      return null;
+    }
+
+    try {
+      setMetadataState("fetching");
+      const response = await resolveTorrentMetadata(normalizedInput);
+      const files = response.details.files ?? [];
+      const nextSession = {
+        infoHash: response.details.info_hash,
+        name: response.details.name ?? "Untitled torrent",
+        files,
+        seenPeers: response.seen_peers?.length ?? 0,
+        torrentId: response.id ?? response.details.id ?? undefined
+      };
+
+      const nextPlayableFiles = files.filter(isPlayable);
+
+      setSession(nextSession);
+      setSelectedFileIndex(0);
+
+      if (nextPlayableFiles.length === 0) {
+        setMetadataState("error");
+        setErrorMessage("Metadata loaded, but no browser-playable video file was found.");
+        return nextSession;
+      }
+
+      setMetadataState("ready");
+      return nextSession;
+    } catch (error) {
+      setSession(null);
+      setMetadataState("error");
+      setErrorMessage(getErrorMessage(error));
+      return null;
+    }
+  }
+
+  async function startPlayback() {
+    const normalizedInput = torrentInput.trim();
+    const activeSession = session ?? (await pullMetadata());
+    const fileToPlay = selectedFile ?? activeSession?.files.find(isPlayable);
+
+    if (!activeSession || !fileToPlay) {
       return;
     }
 
-    setMetadataState("fetching");
-    setIsPlaying(false);
+    try {
+      setMetadataState("starting");
+      setErrorMessage(null);
 
-    window.setTimeout(() => {
-      setMetadataState(normalizedInput.includes("magnet:") || normalizedInput.startsWith("http") ? "ready" : "error");
-    }, 700);
+      const response = await startTorrentDownload(normalizedInput, fileToPlay.name);
+      const torrentId = response.id ?? response.details.id;
+
+      if (typeof torrentId !== "number") {
+        throw new Error("Torrent engine did not return a streamable torrent id.");
+      }
+
+      const nextUrl = getStreamUrl(torrentId, fileToPlay.index);
+
+      setSession({
+        ...activeSession,
+        torrentId,
+        seenPeers: response.seen_peers?.length ?? activeSession.seenPeers
+      });
+      setStreamUrl(nextUrl);
+      setMetadataState("streaming");
+      setIsPlaying(true);
+
+      window.setTimeout(() => {
+        void videoRef.current?.play().catch(() => {
+          setIsPlaying(false);
+        });
+      }, 0);
+    } catch (error) {
+      setMetadataState("error");
+      setErrorMessage(getErrorMessage(error));
+      setIsPlaying(false);
+    }
   }
 
-  const canPlay = metadataState === "ready" && Boolean(selectedFile);
+  const canPlay = (metadataState === "ready" || metadataState === "streaming") && Boolean(selectedFile);
+  const stateTitle =
+    metadataState === "streaming"
+      ? "Streaming"
+      : metadataState === "ready"
+        ? "Ready to play"
+        : metadataState === "fetching"
+          ? "Pulling data"
+          : "Needs source";
 
   return (
     <main className="player-app">
@@ -102,13 +227,13 @@ function App() {
       <section className="input-panel" aria-labelledby="torrent-input-title">
         <div className="input-copy">
           <h2 id="torrent-input-title">Torrent source</h2>
-          <p>Use a magnet URI or direct `.torrent` URL. The first app version focuses on this single path.</p>
+          <p>Use a magnet URI or direct `.torrent` URL. The app resolves metadata before playback.</p>
         </div>
         <form
           className="source-form"
           onSubmit={(event) => {
             event.preventDefault();
-            pullMetadata();
+            void pullMetadata();
           }}
         >
           <label htmlFor="torrent-source">Magnet or torrent URL</label>
@@ -120,7 +245,7 @@ function App() {
               rows={3}
               spellCheck={false}
             />
-            <button type="submit" disabled={metadataState === "fetching"}>
+            <button type="submit" disabled={metadataState === "fetching" || metadataState === "starting"}>
               {metadataState === "fetching" ? (
                 <Loader2 className="spin" size={18} aria-hidden="true" />
               ) : (
@@ -130,50 +255,87 @@ function App() {
             </button>
           </div>
           <p className="helper">
-            TorrentDock will fetch metadata first. Playback starts only after a playable file is known.
+            Requires the local rqbit engine. Docker dev starts it automatically at `http://localhost:3030`.
           </p>
         </form>
       </section>
 
       <section className="player-layout" aria-label="Torrent playback workspace">
         <section className="player-panel" aria-label="Video player">
-          <div className="video-surface">
-            <div className="video-center">
-              {metadataState === "fetching" ? (
-                <Loader2 className="spin" size={42} aria-hidden="true" />
-              ) : (
-                <FileVideo size={46} aria-hidden="true" />
-              )}
-              <div>
-                <h2>{metadataState === "ready" ? activeTorrent?.name : "Waiting for torrent metadata"}</h2>
-                <p aria-live="polite">{metadataStatus}</p>
+          <div className={streamUrl ? "video-surface video-surface-active" : "video-surface"}>
+            {streamUrl ? (
+              <video
+                ref={videoRef}
+                src={streamUrl}
+                controls
+                playsInline
+                onPause={() => setIsPlaying(false)}
+                onPlay={() => setIsPlaying(true)}
+              />
+            ) : (
+              <div className="video-center">
+                {metadataState === "fetching" || metadataState === "starting" ? (
+                  <Loader2 className="spin" size={42} aria-hidden="true" />
+                ) : (
+                  <FileVideo size={46} aria-hidden="true" />
+                )}
+                <div>
+                  <h2>{session?.name ?? "Waiting for torrent metadata"}</h2>
+                  <p aria-live="polite">{metadataStatus}</p>
+                </div>
               </div>
-            </div>
+            )}
             <div className="video-badge">
-              {metadataState === "ready" ? "Local stream preview" : "Metadata required"}
+              {metadataState === "streaming" ? "Local HTTP stream" : metadataState === "ready" ? "Metadata ready" : "Engine required"}
             </div>
           </div>
 
           <div className="player-controls">
-            <button type="button" className="play-button" disabled={!canPlay} onClick={() => setIsPlaying((value) => !value)}>
-              {isPlaying ? <CirclePause size={20} aria-hidden="true" /> : <Play size={20} aria-hidden="true" />}
-              {isPlaying ? "Pause" : "Play"}
+            <button
+              type="button"
+              className="play-button"
+              disabled={!canPlay}
+              onClick={() => {
+                if (streamUrl) {
+                  if (videoRef.current?.paused) {
+                    void videoRef.current.play();
+                  } else {
+                    videoRef.current?.pause();
+                  }
+                  return;
+                }
+
+                void startPlayback();
+              }}
+            >
+              {metadataState === "starting" ? (
+                <Loader2 className="spin" size={20} aria-hidden="true" />
+              ) : isPlaying ? (
+                <CirclePause size={20} aria-hidden="true" />
+              ) : (
+                <Play size={20} aria-hidden="true" />
+              )}
+              {metadataState === "starting" ? "Starting" : isPlaying ? "Pause" : "Play"}
             </button>
-            <div className="timeline" aria-label="Playback progress">
-              <span>10:12</span>
+            <div className="timeline" aria-label="Stream progress">
+              <span>{session ? `${playableFiles.length}` : "0"}</span>
               <div>
-                <span style={{ width: isPlaying ? "38%" : "22%" }} />
+                <span style={{ width: metadataState === "streaming" ? "38%" : metadataState === "ready" ? "18%" : "0%" }} />
               </div>
-              <span>48:00</span>
+              <span>files</span>
             </div>
           </div>
         </section>
 
         <aside className="metadata-panel" aria-label="Metadata and files">
           <div className={`status-card status-${metadataState}`} aria-live="polite">
-            {metadataState === "ready" ? <CheckCircle2 size={20} aria-hidden="true" /> : <AlertTriangle size={20} aria-hidden="true" />}
+            {metadataState === "ready" || metadataState === "streaming" ? (
+              <CheckCircle2 size={20} aria-hidden="true" />
+            ) : (
+              <AlertTriangle size={20} aria-hidden="true" />
+            )}
             <div>
-              <h2>{metadataState === "ready" ? "Ready to play" : metadataState === "fetching" ? "Pulling data" : "Needs source"}</h2>
+              <h2>{stateTitle}</h2>
               <p>{metadataStatus}</p>
             </div>
           </div>
@@ -181,44 +343,62 @@ function App() {
           <div className="stats-grid" aria-label="Torrent health">
             <div>
               <RadioTower size={16} aria-hidden="true" />
-              <span>{activeTorrent?.peers ?? 0}</span>
-              <small>peers</small>
+              <span>{session?.seenPeers ?? 0}</span>
+              <small>seen peers</small>
             </div>
             <div>
               <Download size={16} aria-hidden="true" />
-              <span>{formatRate(activeTorrent?.downloadRate ?? 0)}</span>
-              <small>down</small>
+              <span>{formatBytes(selectedFile?.length ?? 0)}</span>
+              <small>selected</small>
             </div>
             <div>
               <Upload size={16} aria-hidden="true" />
-              <span>{formatRate(activeTorrent?.uploadRate ?? 0)}</span>
-              <small>up</small>
+              <span>{streamUrl ? "ready" : "idle"}</span>
+              <small>stream</small>
             </div>
           </div>
 
           <div className="file-panel">
             <div className="panel-title">
               <h2>Playable files</h2>
-              <button type="button" className="ghost-button" onClick={pullMetadata}>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => {
+                  void pullMetadata();
+                }}
+                disabled={metadataState === "fetching" || metadataState === "starting"}
+              >
                 <RefreshCw size={16} aria-hidden="true" />
                 Refresh
               </button>
             </div>
             <div className="file-options">
-              {playableFiles.map((file, index) => (
-                <button
-                  type="button"
-                  className={index === selectedFileIndex ? "file-option active" : "file-option"}
-                  key={`${file.torrentId}-${file.index}`}
-                  onClick={() => setSelectedFileIndex(index)}
-                  disabled={metadataState !== "ready"}
-                >
-                  <span>{getFileName(file)}</span>
-                  <small>
-                    {formatBytes(file.size)} · {Math.round(file.progress * 100)}%
-                  </small>
-                </button>
-              ))}
+              {playableFiles.length > 0 ? (
+                playableFiles.map((file, index) => (
+                  <button
+                    type="button"
+                    className={index === selectedFileIndex ? "file-option active" : "file-option"}
+                    key={`${file.index}-${file.name}`}
+                    onClick={() => {
+                      setSelectedFileIndex(index);
+                      setStreamUrl(null);
+                      setIsPlaying(false);
+                      if (metadataState === "streaming") {
+                        setMetadataState("ready");
+                      }
+                    }}
+                    disabled={metadataState === "fetching" || metadataState === "starting"}
+                  >
+                    <span>{getFileName(file)}</span>
+                    <small>
+                      {formatBytes(file.length)} · index {file.index}
+                    </small>
+                  </button>
+                ))
+              ) : (
+                <div className="empty-files">Pull metadata to show playable files.</div>
+              )}
             </div>
           </div>
 
