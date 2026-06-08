@@ -1,0 +1,6 @@
+services:
+  check:
+    build:
+      context: .
+      dockerfile: Dockerfile.check
+    command: npm run check:all

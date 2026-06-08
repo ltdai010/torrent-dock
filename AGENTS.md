@@ -48,11 +48,23 @@ Do not push TorrentDock work while `hieunguyenthio` or another GitHub account is
 
 ## Verification
 
-For frontend or scaffold changes, run:
+Prefer Docker for stable verification:
+
+```powershell
+docker compose -f docker-compose.check.yml up --build --abort-on-container-exit
+```
+
+To run the frontend locally through Docker:
+
+```powershell
+docker compose -f docker-compose.dev.yml up --build
+```
+
+When Docker is unavailable, run the host checks:
 
 ```powershell
 npm run build
 npm audit
 ```
 
-For Rust/Tauri backend changes, run `cargo check` from `src-tauri` when Cargo is available on PATH.
+For Rust/Tauri backend changes, run `npm run tauri:check` or `cargo check --manifest-path src-tauri/Cargo.toml` when Cargo is available on PATH.
