@@ -1,0 +1,8 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.check
+    command: npm run dev -- --host 0.0.0.0
+    ports:
+      - "1420:1420"

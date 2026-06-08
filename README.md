@@ -40,3 +40,27 @@ Build the frontend:
 ```bash
 npm run build
 ```
+
+Run the full check suite locally when Node and Rust are installed:
+
+```bash
+npm run check:all
+```
+
+Run the same checks in Docker:
+
+```bash
+docker compose -f docker-compose.check.yml up --build --abort-on-container-exit
+```
+
+Run the web UI in Docker:
+
+```bash
+docker compose -f docker-compose.dev.yml up --build
+```
+
+Then open:
+
+```text
+http://localhost:1420
+```
