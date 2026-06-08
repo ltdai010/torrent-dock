@@ -1,0 +1,252 @@
+:root {
+  color: #17201c;
+  background: #f5f7f6;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+}
+
+.app-shell {
+  min-height: 100vh;
+  padding: 32px;
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(300px, 0.7fr);
+  gap: 24px;
+  align-items: stretch;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.hero-copy {
+  min-height: 430px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 56px;
+  border-radius: 8px;
+  color: #f8fbf8;
+  background:
+    linear-gradient(rgba(18, 37, 31, 0.82), rgba(18, 37, 31, 0.9)),
+    url("https://images.unsplash.com/photo-1558494949-ef010cbdcc31?auto=format&fit=crop&w=1400&q=80");
+  background-size: cover;
+  background-position: center;
+}
+
+.eyebrow {
+  margin: 0 0 18px;
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #79d5b4;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  max-width: 850px;
+  margin-bottom: 22px;
+  font-size: clamp(2.4rem, 5vw, 5.3rem);
+  line-height: 0.98;
+  letter-spacing: 0;
+}
+
+.lede {
+  max-width: 720px;
+  margin-bottom: 28px;
+  color: #d8e8e1;
+  font-size: 1.08rem;
+  line-height: 1.7;
+}
+
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.hero-actions a {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 18px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.status-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  justify-content: center;
+  padding: 24px;
+  border: 1px solid #d9e2dd;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.status-row,
+.notice {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  min-height: 54px;
+  padding: 14px;
+  border-radius: 6px;
+  background: #eef4f1;
+  font-weight: 700;
+}
+
+.notice {
+  align-items: flex-start;
+  background: #fff3d7;
+  color: #64470d;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.workspace,
+.phase-board {
+  max-width: 1180px;
+  margin: 24px auto 0;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.capability,
+.phase {
+  min-height: 180px;
+  padding: 22px;
+  border: 1px solid #d9e2dd;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.capability svg {
+  color: #236d55;
+}
+
+.capability h2,
+.phase h3 {
+  margin: 16px 0 10px;
+  font-size: 1.06rem;
+}
+
+.capability p,
+.phase p,
+.section-heading p {
+  margin-bottom: 0;
+  color: #53615a;
+  line-height: 1.55;
+}
+
+.phase-board {
+  padding: 26px;
+  border: 1px solid #d9e2dd;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.section-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: end;
+  margin-bottom: 18px;
+}
+
+.section-heading h2 {
+  margin-bottom: 0;
+  font-size: 1.45rem;
+}
+
+.phases {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.phase {
+  min-height: 160px;
+  background: #f8faf9;
+}
+
+.phase span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: #e3ece8;
+  color: #264f43;
+  font-size: 0.75rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.phase-ready span {
+  background: #d7f2e4;
+}
+
+.phase-next span {
+  background: #d9e8ff;
+  color: #203d69;
+}
+
+@media (max-width: 940px) {
+  .app-shell {
+    padding: 18px;
+  }
+
+  .hero,
+  .workspace,
+  .phases {
+    grid-template-columns: 1fr;
+  }
+
+  .hero-copy {
+    min-height: 0;
+    padding: 34px 26px;
+  }
+
+  h1 {
+    font-size: 2.55rem;
+  }
+
+  .section-heading {
+    align-items: start;
+    flex-direction: column;
+  }
+}
