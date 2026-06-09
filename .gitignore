@@ -8,6 +8,8 @@ src-tauri/target/
 
 # Tauri generated files
 src-tauri/gen/
+src-tauri/binaries/rqbit-*
+!src-tauri/binaries/.gitkeep
 
 # Local environment
 .env
