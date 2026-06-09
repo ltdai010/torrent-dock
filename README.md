@@ -32,8 +32,11 @@ npm run dev
 Run the desktop app:
 
 ```bash
+npm run sidecar:prepare
 npm run tauri:dev
 ```
+
+`sidecar:prepare` downloads the correct rqbit sidecar binary for the current Rust target triple into `src-tauri/binaries/`. Docker web development still starts rqbit as a Compose service, but packaged desktop builds use the Tauri sidecar path.
 
 Build the frontend:
 

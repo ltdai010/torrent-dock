@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "check:all": "npm run build && npm audit && npm run tauri:check",
     "preview": "vite preview",
+    "sidecar:prepare": "node scripts/prepare-rqbit-sidecar.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:check": "cargo check --manifest-path src-tauri/Cargo.toml"

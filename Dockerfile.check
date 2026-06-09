@@ -32,5 +32,6 @@ COPY src-tauri/src ./src-tauri/src
 RUN cd src-tauri && cargo fetch
 
 COPY . .
+RUN npm run sidecar:prepare
 
 CMD ["npm", "run", "check:all"]
