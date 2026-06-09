@@ -36,9 +36,9 @@ type AddTorrentOptions = {
   onlyFilesRegex?: string;
 };
 
-const API_BASE = "/rqbit";
+const DEFAULT_API_BASE = "/rqbit";
 
-function buildTorrentUrl(options: AddTorrentOptions = {}) {
+function buildTorrentUrl(apiBase = DEFAULT_API_BASE, options: AddTorrentOptions = {}) {
   const params = new URLSearchParams();
 
   if (options.listOnly) {
@@ -50,7 +50,7 @@ function buildTorrentUrl(options: AddTorrentOptions = {}) {
   }
 
   const query = params.toString();
-  return `${API_BASE}/torrents${query ? `?${query}` : ""}`;
+  return `${apiBase}/torrents${query ? `?${query}` : ""}`;
 }
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {
@@ -84,8 +84,8 @@ export function isSupportedTorrentSource(source: string) {
   return source.startsWith("magnet:") || source.startsWith("http://") || source.startsWith("https://");
 }
 
-export async function resolveTorrentMetadata(source: string) {
-  const response = await fetch(buildTorrentUrl({ listOnly: true }), {
+export async function resolveTorrentMetadata(source: string, apiBase?: string) {
+  const response = await fetch(buildTorrentUrl(apiBase, { listOnly: true }), {
     method: "POST",
     headers: {
       "Content-Type": "text/plain"
@@ -96,9 +96,9 @@ export async function resolveTorrentMetadata(source: string) {
   return normalizeTorrentResponse(await parseJsonResponse<RqbitAddTorrentResponse>(response));
 }
 
-export async function startTorrentDownload(source: string, fileName: string) {
+export async function startTorrentDownload(source: string, fileName: string, apiBase?: string) {
   const response = await fetch(
-    buildTorrentUrl({
+    buildTorrentUrl(apiBase, {
       onlyFilesRegex: `^${escapeRegex(fileName)}$`
     }),
     {
@@ -113,6 +113,6 @@ export async function startTorrentDownload(source: string, fileName: string) {
   return normalizeTorrentResponse(await parseJsonResponse<RqbitAddTorrentResponse>(response));
 }
 
-export function getStreamUrl(torrentId: number, fileIndex: number) {
-  return `${API_BASE}/torrents/${torrentId}/stream/${fileIndex}`;
+export function getStreamUrl(apiBase: string | undefined, torrentId: number, fileIndex: number) {
+  return `${apiBase ?? DEFAULT_API_BASE}/torrents/${torrentId}/stream/${fileIndex}`;
 }

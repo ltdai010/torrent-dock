@@ -22,6 +22,7 @@ import {
   startTorrentDownload,
   type RqbitFile
 } from "./services/rqbit";
+import { ensureRqbitEngineEndpoint } from "./services/rqbitEngine";
 
 type MetadataState = "idle" | "fetching" | "ready" | "starting" | "streaming" | "error";
 
@@ -80,6 +81,7 @@ function App() {
   const [metadataState, setMetadataState] = useState<MetadataState>("idle");
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
   const [session, setSession] = useState<TorrentSession | null>(null);
+  const [engineBaseUrl, setEngineBaseUrl] = useState<string | null>(null);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -127,7 +129,10 @@ function App() {
 
     try {
       setMetadataState("fetching");
-      const response = await resolveTorrentMetadata(normalizedInput);
+      const nextEngineBaseUrl = await ensureRqbitEngineEndpoint();
+      setEngineBaseUrl(nextEngineBaseUrl);
+
+      const response = await resolveTorrentMetadata(normalizedInput, nextEngineBaseUrl);
       const files = response.details.files ?? [];
       const nextSession = {
         infoHash: response.details.info_hash,
@@ -162,6 +167,7 @@ function App() {
     const normalizedInput = torrentInput.trim();
     const activeSession = session ?? (await pullMetadata());
     const fileToPlay = selectedFile ?? activeSession?.files.find(isPlayable);
+    const activeEngineBaseUrl = engineBaseUrl ?? (await ensureRqbitEngineEndpoint());
 
     if (!activeSession || !fileToPlay) {
       return;
@@ -170,15 +176,16 @@ function App() {
     try {
       setMetadataState("starting");
       setErrorMessage(null);
+      setEngineBaseUrl(activeEngineBaseUrl);
 
-      const response = await startTorrentDownload(normalizedInput, fileToPlay.name);
+      const response = await startTorrentDownload(normalizedInput, fileToPlay.name, activeEngineBaseUrl);
       const torrentId = response.id ?? response.details.id;
 
       if (typeof torrentId !== "number") {
         throw new Error("Torrent engine did not return a streamable torrent id.");
       }
 
-      const nextUrl = getStreamUrl(torrentId, fileToPlay.index);
+      const nextUrl = getStreamUrl(activeEngineBaseUrl, torrentId, fileToPlay.index);
 
       setSession({
         ...activeSession,
@@ -255,7 +262,7 @@ function App() {
             </button>
           </div>
           <p className="helper">
-            Requires the local rqbit engine. Docker dev starts it automatically at `http://localhost:3030`.
+            Desktop builds start rqbit as a sidecar. Docker dev still proxies the engine through `/rqbit`.
           </p>
         </form>
       </section>
