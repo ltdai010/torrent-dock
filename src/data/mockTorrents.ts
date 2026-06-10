@@ -95,6 +95,7 @@ export const providerResults: ProviderResult[] = [
   {
     id: "linux-feed-libreos",
     providerId: "legal-samples",
+    providerName: "Legal samples",
     title: "LibreOS 2026 Desktop ISO",
     sourceUrl: "https://example.org/libreos/releases/2026",
     infoHashV1: "9f5f4c7d02a8e1bdfb0d0e7fd4d4ad7f0c7e9a10",
@@ -107,6 +108,7 @@ export const providerResults: ProviderResult[] = [
   {
     id: "cc-feed-space-film",
     providerId: "legal-samples",
+    providerName: "Legal samples",
     title: "Creative Commons Space Documentary",
     sourceUrl: "https://example.org/films/space-documentary",
     infoHashV1: "e03ec1fdc28f72a6ef2c3a90dcd24a884e987125",

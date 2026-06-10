@@ -12,18 +12,16 @@ V1 must support:
 
 - Add magnet links.
 - Add `.torrent` files.
+- Add direct torrent URLs.
 - Fetch metadata for magnets.
 - Display torrent file lists.
 - Stream playable video/audio before full download completion.
 - Download large content such as Linux ISOs, FOSS game builds, public-domain films, and Creative Commons media.
 - Manage download queue, cache, seeding policy, and bandwidth limits.
-- Search or auto-fetch from user-configured compliant providers.
 
 V1 must not:
 
-- Bundle piracy-oriented providers.
 - Ship a copyrighted movie/game catalog.
-- Bypass website access controls.
 - Auto-run downloaded executables.
 - Claim anonymity or privacy protection that the app does not provide.
 
@@ -104,7 +102,7 @@ Rust App Backend
   |
   | owns services
   v
-TorrentService  ProviderService  LibraryService  PlaybackService  SafetyService
+TorrentService  InputResolverService  LibraryService  PlaybackService  SafetyService
   |
   | engine adapter
   v
@@ -131,14 +129,14 @@ flowchart TB
 
     D -->|"torrent lifecycle"| E["TorrentService"]
     D -->|"stream playback"| F["StreamingService"]
-    D -->|"provider search"| G["ProviderService"]
+    D -->|"input resolution"| G["InputResolverService"]
     D -->|"library state"| H["LibraryService"]
     D -->|"media controls"| I["PlaybackService"]
 
     E --> J["libtorrent-rasterbar"]
     F --> E
     F --> K["Loopback HTTP range server"]
-    G --> L["RSS, Torznab, legal providers"]
+    G --> L["Magnet, torrent file, torrent URL"]
     H --> M["SQLite database"]
     I --> N["libVLC or external player"]
 
@@ -239,33 +237,26 @@ Best practice:
 - Show buffering as playback state plus torrent cause.
 - Allow "download only" for files that are not stream-friendly.
 
-### 4.4 ProviderService
+### 4.4 InputResolverService
 
-Manages search and feed connectors.
+Manages user-supplied torrent inputs and normalizes them before they reach the torrent engine.
 
 Responsibilities:
 
-- Register provider types.
-- Store provider configuration.
-- Validate provider URLs.
-- Search providers.
-- Refresh feeds.
-- Normalize results.
-- Deduplicate results.
-- Enforce refresh intervals.
-- Keep provider errors visible but isolated.
+- Accept magnet URI text.
+- Accept local `.torrent` files.
+- Accept direct `.torrent` URLs.
+- Validate input shape.
+- Normalize source metadata.
+- Fetch remote `.torrent` files when the user provides a direct URL.
+- Hand validated inputs to TorrentService.
+- Keep input errors visible and recoverable.
 
-V1 provider types:
+V1 input types:
 
-- Manual input.
-- RSS/Atom feed.
-- Torznab-compatible API.
-- Curated legal sample provider.
-
-Scraper connectors:
-
-- Do not build in V1 unless there is a specific authorized source.
-- If added later, they must respect robots.txt, source terms, rate limits, and transparent user-agent rules.
+- Manual magnet input.
+- Local `.torrent` file.
+- Direct `.torrent` URL.
 
 ### 4.5 LibraryService
 
@@ -674,40 +665,40 @@ Failure handling:
 - Token expired: refresh and retry.
 - Unsupported codec: offer external player or download.
 
-### 9.4 Search Provider
+### 9.4 Manual Source Resolution
 
 ```text
-User searches provider
-  -> ProviderService validates provider config
-  -> connector performs search
-  -> results normalize to ProviderResult
-  -> results deduplicate
-  -> UI displays source, size, seeders, and license/source hint
-  -> user selects result
-  -> torrent_add starts from magnet or torrent URL
+User supplies magnet, torrent file, or torrent URL
+  -> InputResolverService validates input
+  -> remote torrent URL is fetched only after explicit user action
+  -> TorrentService adds source to engine
+  -> metadata and file list are resolved
+  -> UI lets user choose playable/downloadable files
+  -> playback or download starts through rqbit
 ```
 
 ```mermaid
 flowchart TD
-    A["User searches provider"] --> B["ProviderService loads provider config"]
-    B --> C{"Provider type"}
-    C -->|"RSS or Atom"| D["Fetch feed"]
-    C -->|"Torznab"| E["Call search API"]
-    C -->|"Curated legal source"| F["Read curated source"]
-    D --> G["Normalize result fields"]
-    E --> G
-    F --> G
-    G --> H["Deduplicate by infohash or source identity"]
-    H --> I["Show source, size, health, and license hints"]
-    I --> J{"User action"}
-    J -->|"start torrent"| K["Call torrent_add"]
-    J -->|"save rule"| L["Create explicit auto-download rule"]
-    J -->|"ignore"| M["No download"]
+    A["User pastes or opens source"] --> B{"Input type"}
+    B -->|"Magnet URI"| C["Validate magnet syntax"]
+    B -->|".torrent file"| D["Read local metainfo"]
+    B -->|"Torrent URL"| E["Fetch .torrent after user action"]
+    C --> F["Add to torrent engine"]
+    D --> F
+    E --> F
+    F --> G["Resolve metadata"]
+    G --> H["Display file list and health"]
+    H --> I{"User action"}
+    I -->|"play file"| J["Start local stream"]
+    I -->|"download"| K["Start download"]
+    I -->|"cancel"| L["Remove pending source"]
 ```
 
 Failure handling:
 
-- Provider unavailable: show provider-level error.
+- Invalid input: show validation error.
+- Remote torrent URL unavailable: show fetch error.
+- Metadata unavailable: show peer discovery and retry state.
 - Rate limited: show retry time.
 - No magnet/torrent URL: result is informational only.
 - Ambiguous duplicates: group results under one item.
@@ -816,15 +807,14 @@ Rules:
 - Do not log full URLs with tokens.
 - Add CORS restrictions if browser playback is used.
 
-### 11.3 Provider Security
+### 11.3 Input Security
 
 Rules:
 
-- No bundled piracy providers.
-- Provider requests use clear user-agent.
-- Credentials are stored securely if any provider needs them.
-- Do not send provider credentials to logs.
-- Do not evaluate arbitrary provider scripts in-process for V1.
+- Validate magnet and URL input before sending it to the engine.
+- Fetch remote torrent URLs only after explicit user action.
+- Do not evaluate arbitrary scripts or provider code.
+- Do not log full URLs if they contain credentials or private tokens.
 
 ## 12. Error Model
 
@@ -980,22 +970,22 @@ Exit criteria:
 
 - User can manage multiple downloads and streaming sessions with predictable disk, queue, and seeding behavior.
 
-### Phase 4: Providers And Search
+### Phase 4: Input And Library Polish
 
 Build:
 
-- Provider registry.
-- RSS/Atom connector.
-- Torznab connector.
-- Curated legal sample provider.
-- Provider search UI.
-- Feed refresh scheduler.
-- Result deduplication.
-- Explicit auto-download rules.
+- Drag-and-drop torrent input.
+- Recent source history.
+- Duplicate torrent detection.
+- Better metadata retry controls.
+- Library filters and labels.
+- Bulk pause/resume/remove actions.
+- Download location rules.
+- Import/export diagnostics for torrent state.
 
 Exit criteria:
 
-- User can add a compliant provider, search/fetch results, and start torrents from selected results.
+- User can manage explicit torrent inputs and library state without needing hidden automation.
 
 ### Phase 5: Production Hardening
 
@@ -1045,9 +1035,9 @@ Cover:
 
 - Add `.torrent`.
 - Add magnet and fetch metadata.
+- Add direct `.torrent` URL.
 - Pause/resume.
 - Save and restore resume data.
-- Provider search against mock RSS/Torznab.
 - Local stream server range responses.
 - Expired token rejection.
 
@@ -1175,16 +1165,16 @@ Mitigation:
 - Support download-first mode.
 - Add media probing later.
 
-### 18.4 Provider Compliance
+### 18.4 Remote URL Handling
 
-Search can become legally and operationally risky.
+Direct torrent URLs can fail, redirect, or point at unexpected content.
 
 Mitigation:
 
-- User-configured providers only.
-- No piracy indexes bundled.
-- Legal curated examples only.
-- Scraping out of V1.
+- Limit automatic redirects.
+- Validate response content type and size.
+- Show source URL in the UI.
+- Store the original user-provided source string for traceability.
 
 ## 19. Engineering Defaults
 
@@ -1198,9 +1188,8 @@ Mitigation:
 - Engine-native resume data.
 - DHT enabled by default with user setting.
 - Post-completion seeding conservative by default.
-- No bundled piracy providers.
-- Auto-fetch allowed only for configured providers.
-- Auto-download requires explicit opt-in rule.
+- V1 accepts explicit user-provided inputs only.
+- Downloads start only from explicit user action.
 
 ## 20. Source Links
 
@@ -1214,5 +1203,4 @@ Mitigation:
 - [libVLC documentation](https://videolan.videolan.me/vlc/libvlc.html)
 - [WebTorrent docs](https://webtorrent.io/docs)
 - [librqbit docs](https://docs.rs/librqbit/latest/librqbit/)
-- [Torznab API Specification](https://torznab.github.io/spec-1.3-draft/torznab/Specification-v1.3.html)
 - [Apple App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/)
