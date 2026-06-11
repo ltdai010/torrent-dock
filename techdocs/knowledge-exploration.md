@@ -1,8 +1,8 @@
 # TorrentDock Knowledge Exploration
 
-This document explains the technology behind TorrentDock before any product or implementation decisions. It focuses on how BitTorrent, magnet links, metadata exchange, peer discovery, streaming, search feeds, and torrent-client safety actually work.
+This document explains the technology behind TorrentDock before any product or implementation decisions. It focuses on how BitTorrent, magnet links, metadata exchange, peer discovery, streaming, direct torrent inputs, and torrent-client safety actually work.
 
-TorrentDock should be a legitimate torrent client and media/download workflow tool. Torrent technology is content-neutral. The same mechanics can distribute Linux ISOs, public-domain films, Creative Commons media, FOSS game builds, large scientific datasets, internal company artifacts, or infringing media. The app design should make authorized use easy without bundling piracy catalogs or hiding what torrenting does.
+TorrentDock should be a torrent client and media/download workflow tool that makes the mechanics visible enough for users to understand what the app is doing. Torrent technology is content-neutral. The same mechanics can distribute Linux ISOs, public-domain films, Creative Commons media, FOSS game builds, large scientific datasets, internal company artifacts, or other content.
 
 ## 1. Mental Model
 
@@ -582,36 +582,28 @@ Best practice:
 - Default to the largest video file for movie-style torrents, but let the user choose.
 - Do not promise all torrents are streamable.
 
-## 9. Search, Feeds, And Website Fetching
+## 9. Direct Inputs And URL Fetching
 
-Search is product-sensitive. Torrent search can be legal if the sources are authorized and user-configured. It becomes risky if the app bundles piracy indexes or scrapes sites against their terms.
+V1 should focus on explicit user-provided torrent sources. A source can be a magnet URI, a local `.torrent` file, or a direct URL to a `.torrent` file.
 
-### 9.1 Provider Types
+### 9.1 Input Types
 
-Recommended provider types:
+Recommended input types:
 
-- **Manual input**: magnet, `.torrent`, torrent URL.
-- **RSS/Atom**: feed items with torrent enclosures or magnet links.
-- **Torznab**: common API style used by torrent indexers and self-hosted aggregators.
-- **Curated legal providers**: public-domain, Creative Commons, open-source, or publisher-approved torrents.
+- **Magnet URI**: identifies the swarm by infohash and optionally provides trackers, web seeds, display name, and exact-source hints.
+- **Local `.torrent` file**: provides full metainfo immediately, so the app can show files without waiting for magnet metadata exchange.
+- **Direct `.torrent` URL**: lets the app fetch a metainfo file from a URL the user explicitly provides.
 
-Reference: [Torznab API Specification](https://torznab.github.io/spec-1.3-draft/torznab/Specification-v1.3.html)
+### 9.2 Remote Torrent URL Best Practices
 
-### 9.2 Scraping Best Practices
+If direct URL fetching is supported:
 
-If website fetching is added later:
-
-- Require user-configured connectors.
-- Respect robots.txt.
-- Respect source terms.
-- Use clear user-agent identification.
-- Rate limit aggressively.
-- Cache responses.
-- Provide source attribution.
-- Let users disable a connector.
-- Do not bypass anti-bot, login, paywall, or access controls.
-
-Reference: [AWS Web Crawler Best Practices](https://docs.aws.amazon.com/prescriptive-guidance/latest/web-crawling-system-esg-data/best-practices.html)
+- Fetch only after explicit user action.
+- Limit redirects.
+- Enforce reasonable maximum response size.
+- Validate that the response is a bencoded metainfo file before handing it to the engine.
+- Preserve the original source URL for troubleshooting.
+- Avoid logging full URLs if they contain tokens or credentials.
 
 ### 9.3 Result Deduplication
 
@@ -620,8 +612,8 @@ Best identifiers:
 1. v1 infohash
 2. v2 infohash
 3. Magnet exact topic
-4. Torrent URL plus source
-5. Normalized title, size, and provider
+4. Torrent URL plus source input
+5. Normalized title and size
 
 Do not deduplicate by title alone. Torrent titles are noisy and inconsistent.
 
@@ -799,9 +791,7 @@ Reference: [Apple App Review Guidelines](https://developer.apple.com/app-store/r
 Best practice:
 
 - Desktop direct distribution first.
-- No bundled piracy providers.
 - Legal sample content only.
-- Clear provider terms responsibility.
 - Legal review before public release.
 
 ## 13. Lessons From Existing Apps
@@ -842,8 +832,8 @@ Reference: [qBittorrent](https://www.qbittorrent.org/)
 
 Useful lessons:
 
-- Addon separation helps keep the core app source-neutral.
-- The app should distinguish core playback from third-party source responsibility.
+- Addon separation is useful when optional discovery features live outside the core client.
+- The core playback path should remain separate from any optional future extension system.
 
 Reference: [Stremio BitTorrent help](https://stremio.zendesk.com/hc/en-us/articles/360000281292-Does-Stremio-use-BitTorrent)
 
@@ -858,11 +848,10 @@ Reference: [Stremio BitTorrent help](https://stremio.zendesk.com/hc/en-us/articl
 7. Bind local servers to loopback by default.
 8. Tokenize local stream URLs.
 9. Do not expose raw engine controls directly to the UI.
-10. Keep search providers user-configured and compliant.
-11. Avoid bundled piracy catalogs.
-12. Make seeding, IP exposure, and executable risk visible.
-13. Design for v2/hybrid torrents even if v1 ships first.
-14. Test only with legal torrents.
+10. Keep remote fetching explicit and user initiated.
+11. Make seeding, IP exposure, and executable risk visible.
+12. Design for v2/hybrid torrents even if v1 ships first.
+13. Test with known controlled torrents.
 
 ## 15. Source Links
 
@@ -877,9 +866,7 @@ Reference: [Stremio BitTorrent help](https://stremio.zendesk.com/hc/en-us/articl
 - [WebTorrent docs](https://webtorrent.io/docs)
 - [WebTorrent Desktop](https://github.com/webtorrent/webtorrent-desktop)
 - [librqbit docs](https://docs.rs/librqbit/latest/librqbit/)
-- [Torznab API Specification](https://torznab.github.io/spec-1.3-draft/torznab/Specification-v1.3.html)
 - [Tauri permissions](https://v2.tauri.app/security/permissions/)
 - [Tauri runtime authority](https://v2.tauri.app/security/runtime-authority/)
 - [Tauri sidecar guide](https://v2.tauri.app/learn/sidecar-nodejs/)
 - [Apple App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/)
-- [AWS Web Crawler Best Practices](https://docs.aws.amazon.com/prescriptive-guidance/latest/web-crawling-system-esg-data/best-practices.html)

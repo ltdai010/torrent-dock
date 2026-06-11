@@ -57,6 +57,7 @@ export type TorrentSummary = {
 export type ProviderResult = {
   id: string;
   providerId: string;
+  providerName: string;
   title: string;
   sourceUrl: string;
   magnetUri?: string;
@@ -68,6 +69,17 @@ export type ProviderResult = {
   leechers?: number;
   category?: string;
   licenseHint?: string;
+};
+
+export type ProviderSearchError = {
+  providerId: string;
+  providerName: string;
+  message: string;
+};
+
+export type ProviderSearchResponse = {
+  results: ProviderResult[];
+  errors: ProviderSearchError[];
 };
 
 export type StreamHealth =
