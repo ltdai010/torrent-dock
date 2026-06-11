@@ -178,17 +178,26 @@ pub async fn search_movie_titles(query: String) -> Result<Vec<MovieTitleCandidat
         .get(&url)
         .send()
         .await
-        .map_err(|error| format!("title lookup failed: {error}"))?;
+        .map_err(|error| {
+            let message = format!("title lookup failed: {error}");
+            log_catalog_diagnostic(&format!("request error for {url}: {error:?}"));
+            message
+        })?;
     let status = response.status();
 
     if !status.is_success() {
+        log_catalog_diagnostic(&format!("non-success status {status} for {url}"));
         return Err(format!("title lookup returned HTTP {status}."));
     }
 
     let payload = response
         .json::<ImdbSuggestionResponse>()
         .await
-        .map_err(|error| format!("title lookup response could not be parsed: {error}"))?;
+        .map_err(|error| {
+            let message = format!("title lookup response could not be parsed: {error}");
+            log_catalog_diagnostic(&format!("parse error for {url}: {error:?}"));
+            message
+        })?;
 
     Ok(payload
         .d
@@ -479,6 +488,22 @@ fn provider_error(provider_id: &str, provider_name: &str, message: String) -> Pr
 
 fn normalized_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn log_catalog_diagnostic(message: &str) {
+    eprintln!("[catalog] {message}");
+
+    if let Ok(mut path) = std::env::temp_dir().canonicalize() {
+        path.push("torrentdock-catalog.log");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{message}");
+        }
+    }
 }
 
 fn movie_candidate_from_imdb_item(item: ImdbSuggestionItem) -> Option<MovieTitleCandidate> {

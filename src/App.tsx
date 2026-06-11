@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, CSSProperties } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -8,6 +9,7 @@ import {
   Clapperboard,
   Download,
   FileVideo,
+  History,
   ListChecks,
   Loader2,
   Magnet,
@@ -17,17 +19,25 @@ import {
   RadioTower,
   Search,
   ShieldCheck,
+  Square,
   StepBack,
   StepForward,
+  Trash2,
   Upload
 } from "lucide-react";
 import {
   getTorrentDownloadProgress,
-  getStreamUrl,
+  getVideoStreamSrc,
   isSupportedTorrentSource,
+  listLibraryTorrents,
+  pauseTorrent,
+  readTorrentFileAsText,
+  removeTorrent,
+  resumeTorrent,
   resolveTorrentMetadata,
   RqbitApiError,
   startTorrentDownload,
+  type LibraryTorrent,
   type TorrentDownloadProgress,
   type RqbitFile
 } from "./services/rqbit";
@@ -172,6 +182,31 @@ function getFileName(file: RqbitFile) {
 function isPlayable(file: RqbitFile) {
   const fileName = getFileName(file).toLowerCase();
   return Array.from(playableExtensions).some((extension) => fileName.endsWith(extension));
+}
+
+function fileExtension(fileName: string) {
+  const dotIndex = fileName.lastIndexOf(".");
+  return dotIndex >= 0 ? fileName.slice(dotIndex).toLowerCase() : "";
+}
+
+function describeMediaError(error: MediaError | null, fileName: string): string {
+  const extension = fileExtension(fileName);
+  const formatHint =
+    ` The built-in player can only decode MP4 (H.264/AAC), WebM, and OGG. ` +
+    `${extension ? `"${extension}" files` : "Files like this"} — typically MKV/AVI containers or HEVC/H.265 video with AC3/DTS audio — can't be played here.`;
+
+  switch (error?.code) {
+    case MediaError.MEDIA_ERR_ABORTED:
+      return "Playback was stopped.";
+    case MediaError.MEDIA_ERR_NETWORK:
+      return "Lost the connection to the local torrent stream. Keep the torrent running and try again.";
+    case MediaError.MEDIA_ERR_DECODE:
+      return `This video uses a codec the built-in player can't decode.${formatHint}`;
+    case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
+      return `This file's format isn't supported by the built-in player.${formatHint}`;
+    default:
+      return `The video could not be played.${formatHint}`;
+  }
 }
 
 function isSubtitleFile(file: RqbitFile) {
@@ -387,6 +422,11 @@ function getErrorMessage(error: unknown) {
     return error.message;
   }
 
+  // Tauri command rejections arrive as plain strings, not Error instances.
+  if (typeof error === "string" && error.trim().length > 0) {
+    return error;
+  }
+
   return "Something went wrong while talking to the torrent engine.";
 }
 
@@ -400,7 +440,7 @@ function App() {
   const [session, setSession] = useState<TorrentSession | null>(null);
   const [engineBaseUrl, setEngineBaseUrl] = useState<string | null>(null);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
+  const [videoError, setVideoError] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [sourceQuery, setSourceQuery] = useState("");
   const [sourceSearchState, setSourceSearchState] = useState<SourceSearchState>("idle");
@@ -434,11 +474,19 @@ function App() {
   const [onlineSubtitleError, setOnlineSubtitleError] = useState<string | null>(null);
   const [onlineSubtitleLoadingResultId, setOnlineSubtitleLoadingResultId] = useState<string | null>(null);
   const [activeOnlineResultId, setActiveOnlineResultId] = useState<string | null>(null);
+  const [isStoppingTorrent, setIsStoppingTorrent] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [historyItems, setHistoryItems] = useState<LibraryTorrent[]>([]);
+  const [historyState, setHistoryState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyBusyId, setHistoryBusyId] = useState<number | null>(null);
+  const [isClearingHistory, setIsClearingHistory] = useState(false);
 
   const playableFiles = useMemo(() => session?.files.filter(isPlayable) ?? [], [session]);
   const subtitleFiles = useMemo(() => session?.files.filter(isSubtitleFile) ?? [], [session]);
   const selectedFile = playableFiles[selectedFileIndex] ?? playableFiles[0];
   const isTorrentLoading = metadataState === "fetching" || metadataState === "starting";
+  const hasActivePlaybackLoad = isTorrentLoading || Boolean(streamUrl);
   const normalizedEntry = sourceQuery.trim();
   const entryIsTorrentSource = isTorrentSourceInput(normalizedEntry);
   const shouldShowCatalogStatus = catalogSearchState !== "idle" || catalogResults.length > 0;
@@ -739,7 +787,7 @@ function App() {
     } catch (error) {
       setCatalogResults([]);
       setCatalogSearchState("error");
-      setCatalogErrorMessage(error instanceof Error ? error.message : "Could not find title matches.");
+      setCatalogErrorMessage(getErrorMessage(error));
     }
   }
 
@@ -779,12 +827,128 @@ function App() {
 
     activeLoadAbortRef.current = null;
     setStreamUrl(null);
-    setIsPlaying(false);
     setSession(null);
     setDownloadProgress(null);
     setSelectedFileIndex(0);
     setMetadataState("stopped");
     setErrorMessage(null);
+  }
+
+  // Stops playback and tells the engine to stop pulling the torrent (pause), so
+  // it no longer downloads/seeds in the background. The torrent stays in the
+  // engine and remains visible in History for later cleanup or resume.
+  async function stopStreamingAndTorrent() {
+    const torrentId = session?.torrentId;
+    const activeEngineBaseUrl = engineBaseUrl ?? undefined;
+    const controller = activeLoadAbortRef.current;
+
+    setIsStoppingTorrent(true);
+    try {
+      controller?.abort();
+      activeLoadAbortRef.current = null;
+      videoRef.current?.pause();
+      setStreamUrl(null);
+      setDownloadProgress(null);
+      setVideoError(null);
+      setErrorMessage(null);
+      setMetadataState(session ? "ready" : "stopped");
+
+      if (typeof torrentId === "number") {
+        await pauseTorrent(torrentId, activeEngineBaseUrl).catch(() => undefined);
+      }
+    } finally {
+      setIsStoppingTorrent(false);
+    }
+  }
+
+  async function openHistory() {
+    setShowHistory(true);
+    await loadHistory();
+  }
+
+  function closeHistory() {
+    setShowHistory(false);
+  }
+
+  async function loadHistory() {
+    setHistoryState("loading");
+    setHistoryError(null);
+
+    try {
+      const activeEngineBaseUrl = engineBaseUrl ?? (await ensureRqbitEngineEndpoint());
+      setEngineBaseUrl(activeEngineBaseUrl);
+      const items = await listLibraryTorrents(activeEngineBaseUrl);
+      items.sort((a, b) => b.id - a.id);
+      setHistoryItems(items);
+      setHistoryState("ready");
+    } catch (error) {
+      setHistoryItems([]);
+      setHistoryState("error");
+      setHistoryError(getErrorMessage(error));
+    }
+  }
+
+  async function removeHistoryItem(item: LibraryTorrent, deleteFiles: boolean) {
+    setHistoryBusyId(item.id);
+    setHistoryError(null);
+
+    try {
+      const activeEngineBaseUrl = engineBaseUrl ?? (await ensureRqbitEngineEndpoint());
+
+      if (session?.torrentId === item.id) {
+        stopCurrentLoad();
+      }
+
+      await removeTorrent(item.id, activeEngineBaseUrl, deleteFiles);
+      setHistoryItems((current) => current.filter((entry) => entry.id !== item.id));
+    } catch (error) {
+      setHistoryError(getErrorMessage(error));
+    } finally {
+      setHistoryBusyId(null);
+    }
+  }
+
+  async function clearHistory() {
+    if (
+      historyItems.length === 0 ||
+      !window.confirm(
+        `Delete all ${historyItems.length} torrent${historyItems.length === 1 ? "" : "s"} and their downloaded files? This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+
+    setIsClearingHistory(true);
+    setHistoryError(null);
+
+    try {
+      const activeEngineBaseUrl = engineBaseUrl ?? (await ensureRqbitEngineEndpoint());
+      const items = [...historyItems];
+      const activeTorrentId = session?.torrentId;
+
+      if (typeof activeTorrentId === "number" && items.some((item) => item.id === activeTorrentId)) {
+        stopCurrentLoad();
+      }
+
+      const results = await Promise.allSettled(
+        items.map((item) => removeTorrent(item.id, activeEngineBaseUrl, true))
+      );
+      const failedIds = new Set(
+        results.flatMap((result, index) => (result.status === "rejected" ? [items[index].id] : []))
+      );
+
+      setHistoryItems(items.filter((item) => failedIds.has(item.id)));
+
+      if (failedIds.size > 0) {
+        setHistoryError(
+          `Deleted ${items.length - failedIds.size} of ${items.length} torrents. ${failedIds.size} could not be removed; refresh and retry.`
+        );
+      }
+    } catch (error) {
+      setHistoryError(getErrorMessage(error));
+    } finally {
+      setIsClearingHistory(false);
+    }
   }
 
   function returnToTitleSearch() {
@@ -799,7 +963,6 @@ function App() {
     setSession(null);
     setStreamUrl(null);
     setDownloadProgress(null);
-    setIsPlaying(false);
     setSelectedFileIndex(0);
     setMetadataState("idle");
     setErrorMessage(null);
@@ -816,7 +979,6 @@ function App() {
     setSession(null);
     setStreamUrl(null);
     setDownloadProgress(null);
-    setIsPlaying(false);
     setSelectedFileIndex(0);
     setSelectedSourceResultId(null);
     setMetadataState("idle");
@@ -923,6 +1085,105 @@ function App() {
     );
   }
 
+  function renderHistoryPage() {
+    return (
+      <section className="history-page" aria-label="Download history">
+        <div className="history-header">
+          <div>
+            <h2>Download history</h2>
+            <p>Torrents the engine is tracking. Remove old downloads to free disk space.</p>
+          </div>
+          <div className="history-header-actions">
+            <button
+              type="button"
+              className="ghost-button danger"
+              onClick={() => void clearHistory()}
+              disabled={historyItems.length === 0 || isClearingHistory || historyBusyId !== null}
+              title="Delete every torrent in history and remove its downloaded files"
+            >
+              {isClearingHistory ? (
+                <Loader2 className="spin" size={16} aria-hidden="true" />
+              ) : (
+                <Trash2 size={16} aria-hidden="true" />
+              )}
+              {isClearingHistory ? "Deleting all" : "Delete all files"}
+            </button>
+            <button type="button" className="ghost-button" onClick={() => void loadHistory()} disabled={historyState === "loading"}>
+              {historyState === "loading" ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <RadioTower size={16} aria-hidden="true" />}
+              Refresh
+            </button>
+            <button type="button" className="ghost-button" onClick={closeHistory}>
+              <ArrowLeft size={16} aria-hidden="true" />
+              Back
+            </button>
+          </div>
+        </div>
+
+        {historyError ? <p className="history-error" role="alert">{historyError}</p> : null}
+
+        {historyState === "loading" && historyItems.length === 0 ? (
+          <div className="history-empty">
+            <Loader2 className="spin" size={28} aria-hidden="true" />
+            <p>Loading torrents from the engine…</p>
+          </div>
+        ) : historyItems.length === 0 ? (
+          <div className="history-empty">
+            <History size={28} aria-hidden="true" />
+            <p>No downloads yet. Torrents you stream will show up here.</p>
+          </div>
+        ) : (
+          <ul className="history-list">
+            {historyItems.map((item) => {
+              const isBusy = isClearingHistory || historyBusyId === item.id;
+              const statusLabel = item.finished
+                ? "Completed"
+                : item.state
+                  ? `${item.state} - ${formatPercentage(item.percent)}`
+                  : formatPercentage(item.percent);
+
+              return (
+                <li className="history-item" key={item.id}>
+                  <div className="history-item-main">
+                    <FileVideo size={20} aria-hidden="true" />
+                    <div className="history-item-text">
+                      <strong title={item.name}>{item.name}</strong>
+                      <small>
+                        {formatBytes(item.progressBytes)}
+                        {item.totalBytes > 0 ? ` / ${formatBytes(item.totalBytes)}` : ""} - {statusLabel}
+                      </small>
+                      {item.outputFolder ? <small className="history-item-path" title={item.outputFolder}>{item.outputFolder}</small> : null}
+                    </div>
+                  </div>
+                  <div className="history-item-actions">
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      disabled={isBusy}
+                      onClick={() => void removeHistoryItem(item, false)}
+                      title="Remove from the engine but keep the downloaded files on disk"
+                    >
+                      Remove
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost-button danger"
+                      disabled={isBusy}
+                      onClick={() => void removeHistoryItem(item, true)}
+                      title="Remove from the engine and delete the downloaded files"
+                    >
+                      {isBusy ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Trash2 size={16} aria-hidden="true" />}
+                      Delete files
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+    );
+  }
+
   async function loadDirectSource(source: string) {
     const normalizedSource = source.trim();
 
@@ -991,13 +1252,8 @@ function App() {
     try {
       setSubtitleLoadingFileIndex(file.index);
       setSubtitleError(null);
-      const response = await fetch(getStreamUrl(engineBaseUrl, session.torrentId, file.index));
-
-      if (!response.ok) {
-        throw new Error("Could not read that subtitle file from the torrent. Keep the torrent running and retry.");
-      }
-
-      loadSubtitleText(await response.text(), getFileName(file));
+      const subtitleText = await readTorrentFileAsText(engineBaseUrl, session.torrentId, file.index);
+      loadSubtitleText(subtitleText, getFileName(file));
     } catch (error) {
       setSubtitleError(error instanceof Error ? error.message : "Could not load that subtitle file from the torrent.");
     } finally {
@@ -1156,7 +1412,6 @@ function App() {
     let controller: AbortController | null = null;
 
     setStreamUrl(null);
-    setIsPlaying(false);
     setErrorMessage(null);
     setDownloadProgress(null);
 
@@ -1270,6 +1525,7 @@ function App() {
       controller = beginLoadRequest();
       setMetadataState("starting");
       setErrorMessage(null);
+      setVideoError(null);
       setEngineBaseUrl(activeEngineBaseUrl);
 
       const response = await startTorrentDownload(
@@ -1289,7 +1545,13 @@ function App() {
         throw new Error("Torrent engine did not return a streamable torrent id.");
       }
 
-      const nextUrl = getStreamUrl(activeEngineBaseUrl, torrentId, fileToPlay.index);
+      await resumeTorrent(torrentId, activeEngineBaseUrl, { signal: controller.signal });
+
+      if (controller.signal.aborted) {
+        throw new DOMException("Stopped current torrent load.", "AbortError");
+      }
+
+      const nextUrl = getVideoStreamSrc(activeEngineBaseUrl, torrentId, fileToPlay.index);
 
       setSession({
         ...activeSession,
@@ -1297,13 +1559,20 @@ function App() {
         seenPeers: response.seen_peers?.length ?? activeSession.seenPeers
       });
       setDownloadProgress(null);
+      setVideoError(null);
       setStreamUrl(nextUrl);
       setMetadataState("streaming");
-      setIsPlaying(true);
 
       window.setTimeout(() => {
-        void videoRef.current?.play().catch(() => {
-          setIsPlaying(false);
+        void videoRef.current?.play().catch((error: unknown) => {
+          if (
+            error instanceof DOMException &&
+            (error.name === "NotAllowedError" || error.name === "NotSupportedError" || error.name === "AbortError")
+          ) {
+            return;
+          }
+
+          setVideoError(getErrorMessage(error));
         });
       }, 0);
     } catch (error) {
@@ -1312,15 +1581,14 @@ function App() {
           setMetadataState("stopped");
           setErrorMessage(null);
           setDownloadProgress(null);
-          setIsPlaying(false);
         }
         return;
       }
 
-      setMetadataState("error");
-      setErrorMessage(getErrorMessage(error));
+      setMetadataState("ready");
+      setVideoError(getErrorMessage(error));
+      setErrorMessage(null);
       setDownloadProgress(null);
-      setIsPlaying(false);
     } finally {
       if (controller) {
         clearLoadRequest(controller);
@@ -1352,13 +1620,31 @@ function App() {
           <p className="eyebrow">TorrentDock v1</p>
           <h1>Search or paste a magnet.</h1>
         </div>
-        <div className="safety-chip">
-          <ShieldCheck size={18} aria-hidden="true" />
-          Legal sources only
+        <div className="topbar-actions">
+          <button
+            type="button"
+            className={showHistory ? "ghost-button history-toggle active" : "ghost-button history-toggle"}
+            onClick={() => {
+              if (showHistory) {
+                closeHistory();
+              } else {
+                void openHistory();
+              }
+            }}
+          >
+            <History size={16} aria-hidden="true" />
+            History
+          </button>
+          <div className="safety-chip">
+            <ShieldCheck size={18} aria-hidden="true" />
+            Legal sources only
+          </div>
         </div>
       </header>
 
-      {viewMode === "search" ? (
+      {showHistory ? renderHistoryPage() : null}
+
+      {!showHistory && viewMode === "search" ? (
         <>
       <section className="command-panel" aria-labelledby="source-entry-title">
         <form
@@ -1528,7 +1814,7 @@ function App() {
         </>
       ) : null}
 
-      {viewMode === "browse" ? (
+      {!showHistory && viewMode === "browse" ? (
         <>
           {renderSelectedTitleBar()}
           <section className="browse-layout" aria-label="Selected title and sources">
@@ -1578,7 +1864,7 @@ function App() {
         </>
       ) : null}
 
-      {viewMode === "player" ? (
+      {!showHistory && viewMode === "player" ? (
         <>
           {renderSelectedTitleBar(true)}
         <section className="player-layout" aria-label="Torrent playback workspace">
@@ -1592,8 +1878,14 @@ function App() {
                 controls
                 playsInline
                 style={subtitleStyle}
-                onPause={() => setIsPlaying(false)}
-                onPlay={() => setIsPlaying(true)}
+                onPlay={() => {
+                  setVideoError(null);
+                }}
+                onError={(event) => {
+                  setVideoError(describeMediaError(event.currentTarget.error, selectedFile ? getFileName(selectedFile) : session?.name ?? ""));
+                  setStreamUrl(null);
+                  setMetadataState("ready");
+                }}
               >
                 {subtitleTrackUrl ? (
                   <track
@@ -1623,34 +1915,37 @@ function App() {
             <div className="video-badge">
               {metadataState === "streaming" ? "Local HTTP stream" : metadataState === "ready" ? "Metadata ready" : "Engine required"}
             </div>
+            {videoError ? (
+              <div className="video-error" role="alert">
+                <FileVideo size={28} aria-hidden="true" />
+                <p>{videoError}</p>
+              </div>
+            ) : null}
           </div>
 
           <div className="player-controls">
             <button
               type="button"
-              className="play-button"
-              disabled={!canPlay}
+              className={hasActivePlaybackLoad ? "play-button stop-button" : "play-button"}
+              disabled={isStoppingTorrent || (!hasActivePlaybackLoad && !canPlay)}
               onClick={() => {
-                if (streamUrl) {
-                  if (videoRef.current?.paused) {
-                    void videoRef.current.play();
-                  } else {
-                    videoRef.current?.pause();
-                  }
+                if (hasActivePlaybackLoad) {
+                  void stopStreamingAndTorrent();
                   return;
                 }
 
                 void startPlayback();
               }}
+              title={hasActivePlaybackLoad ? "Stop the current torrent load and stream" : "Start playback"}
             >
-              {metadataState === "starting" ? (
+              {isStoppingTorrent ? (
                 <Loader2 className="spin" size={20} aria-hidden="true" />
-              ) : isPlaying ? (
-                <CirclePause size={20} aria-hidden="true" />
+              ) : hasActivePlaybackLoad ? (
+                <Square size={20} aria-hidden="true" />
               ) : (
                 <Play size={20} aria-hidden="true" />
               )}
-              {metadataState === "starting" ? "Starting" : isPlaying ? "Pause" : "Play"}
+              {isStoppingTorrent ? "Stopping" : hasActivePlaybackLoad ? "Stop" : "Play"}
             </button>
             <div className="download-progress" aria-label="Download progress">
               <div className="progress-labels">

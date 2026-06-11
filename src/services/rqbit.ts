@@ -1,3 +1,11 @@
+import { invoke } from "@tauri-apps/api/core";
+
+declare global {
+  interface Window {
+    __TAURI_INTERNALS__?: unknown;
+  }
+}
+
 export type RqbitFile = {
   index: number;
   name: string;
@@ -33,6 +41,7 @@ type RqbitTorrentListResponse = {
 type RqbitTorrentStatsResponse = {
   state?: string;
   error?: string | null;
+  finished?: boolean;
   progress_bytes?: number;
   total_bytes?: number;
   live?: {
@@ -102,9 +111,107 @@ type PeerProbeOptions = {
 };
 
 const DEFAULT_API_BASE = "/rqbit";
+const RQBIT_DIRECT_BASE = "http://127.0.0.1:3030";
 const DEFAULT_PROBE_DURATION_MS = 8500;
 const DEFAULT_PROBE_SAMPLE_INTERVAL_MS = 1000;
 const DEFAULT_PROBE_REQUEST_TIMEOUT_MS = 18000;
+const TORRENT_START_TIMEOUT_MS = 30000;
+const TORRENT_START_POLL_INTERVAL_MS = 250;
+
+type RqbitHttpResponse = {
+  ok: boolean;
+  status: number;
+  statusText: string;
+  text: () => Promise<string>;
+};
+
+type RqbitProxyResult = {
+  ok: boolean;
+  status: number;
+  body: string;
+};
+
+function isTauriRuntime() {
+  return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
+}
+
+function extractRqbitPath(url: string) {
+  const parsed = new URL(url, RQBIT_DIRECT_BASE);
+  return `${parsed.pathname}${parsed.search}`;
+}
+
+function headerValue(headers: HeadersInit | undefined, name: string) {
+  if (!headers) {
+    return undefined;
+  }
+
+  if (headers instanceof Headers) {
+    return headers.get(name) ?? undefined;
+  }
+
+  if (Array.isArray(headers)) {
+    return headers.find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
+  }
+
+  const record = headers as Record<string, string>;
+  return record[name] ?? record[name.toLowerCase()];
+}
+
+// In the packaged Tauri app the webview origin (http://tauri.localhost) cannot
+// call the rqbit HTTP API directly because rqbit does not return CORS headers
+// for that origin. Route those requests through a Rust command instead. In the
+// browser dev server the Vite proxy handles "/rqbit", so plain fetch is used.
+async function requestRqbit(url: string, init?: RequestInit): Promise<RqbitHttpResponse> {
+  if (!isTauriRuntime()) {
+    return fetch(url, init);
+  }
+
+  if (init?.signal?.aborted) {
+    throw new DOMException("The operation was aborted.", "AbortError");
+  }
+
+  const method = (init?.method ?? "GET").toUpperCase();
+  const body = typeof init?.body === "string" ? init.body : undefined;
+  const request = invoke<RqbitProxyResult>("rqbit_api_request", {
+    method,
+    path: extractRqbitPath(url),
+    body: body ?? null,
+    contentType: headerValue(init?.headers, "Content-Type") ?? null
+  });
+  const result = init?.signal ? await withAbortSignal(request, init.signal) : await request;
+
+  return {
+    ok: result.ok,
+    status: result.status,
+    statusText: "",
+    text: async () => result.body
+  };
+}
+
+function withAbortSignal<T>(request: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      reject(new DOMException("The operation was aborted.", "AbortError"));
+    };
+
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) {
+      abort();
+      return;
+    }
+
+    request.then(
+      (result) => {
+        signal.removeEventListener("abort", abort);
+        resolve(result);
+      },
+      (error) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      }
+    );
+  });
+}
 
 function buildTorrentUrl(apiBase = DEFAULT_API_BASE, options: AddTorrentOptions = {}) {
   const params = new URLSearchParams();
@@ -121,7 +228,7 @@ function buildTorrentUrl(apiBase = DEFAULT_API_BASE, options: AddTorrentOptions 
   return `${apiBase}/torrents${query ? `?${query}` : ""}`;
 }
 
-async function parseJsonResponse<T>(response: Response): Promise<T> {
+async function parseJsonResponse<T>(response: RqbitHttpResponse): Promise<T> {
   const bodyText = await response.text();
 
   if (!response.ok) {
@@ -163,7 +270,7 @@ export function isSupportedTorrentSource(source: string) {
 }
 
 export async function resolveTorrentMetadata(source: string, apiBase?: string, options: RequestOptions = {}) {
-  const response = await fetch(buildTorrentUrl(apiBase, { listOnly: true }), {
+  const response = await requestRqbit(buildTorrentUrl(apiBase, { listOnly: true }), {
     method: "POST",
     headers: {
       "Content-Type": "text/plain"
@@ -176,7 +283,7 @@ export async function resolveTorrentMetadata(source: string, apiBase?: string, o
 }
 
 export async function startTorrentDownload(source: string, fileNames: string | string[], apiBase?: string, options: RequestOptions = {}) {
-  const response = await fetch(
+  const response = await requestRqbit(
     buildTorrentUrl(apiBase, {
       onlyFilesRegex: buildOnlyFilesRegex(fileNames)
     }),
@@ -255,12 +362,52 @@ export function getStreamUrl(apiBase: string | undefined, torrentId: number, fil
   return `${apiBase ?? DEFAULT_API_BASE}/torrents/${torrentId}/stream/${fileIndex}`;
 }
 
+// Source URL for the <video> element.
+//
+// In the browser dev server the stream is reached same-origin through the Vite
+// proxy ("/rqbit/..."), so partial/progressive streaming works while the file
+// is still downloading. In the packaged app the webview origin is
+// "http://tauri.localhost" and loading "http://127.0.0.1:3030" directly is
+// cross-origin: a fully-downloaded file happens to load, but rqbit's long-lived
+// blocking stream response for an in-progress file does not. To match the dev
+// behavior we serve the stream same-origin through the in-process "stream"
+// custom protocol, which proxies rqbit in bounded Range chunks. On Windows the
+// scheme is exposed as http://stream.localhost/<torrentId>/<fileIndex>.
+export function getVideoStreamSrc(apiBase: string | undefined, torrentId: number, fileIndex: number) {
+  if (isTauriRuntime()) {
+    return `http://stream.localhost/${torrentId}/${fileIndex}`;
+  }
+
+  return getStreamUrl(apiBase, torrentId, fileIndex);
+}
+
+// Reads a (text) file out of the torrent stream endpoint. Used to load a
+// subtitle that ships inside the torrent. Goes through the CORS-safe proxy in
+// the packaged app; the <video> element keeps using getStreamUrl directly,
+// since media playback does not require CORS.
+export async function readTorrentFileAsText(
+  apiBase: string | undefined,
+  torrentId: number,
+  fileIndex: number,
+  options: RequestOptions = {}
+): Promise<string> {
+  const response = await requestRqbit(getStreamUrl(apiBase, torrentId, fileIndex), {
+    signal: options.signal
+  });
+
+  if (!response.ok) {
+    throw new Error("Could not read that subtitle file from the torrent. Keep the torrent running and retry.");
+  }
+
+  return response.text();
+}
+
 export async function getTorrentDownloadProgress(
   torrentId: number,
   apiBase?: string,
   options: RequestOptions = {}
 ): Promise<TorrentDownloadProgress> {
-  const response = await fetch(`${apiBase ?? DEFAULT_API_BASE}/torrents/${torrentId}/stats/v1`, {
+  const response = await requestRqbit(`${apiBase ?? DEFAULT_API_BASE}/torrents/${torrentId}/stats/v1`, {
     signal: options.signal
   });
   const stats = await parseJsonResponse<RqbitTorrentStatsResponse>(response);
@@ -317,7 +464,118 @@ async function stopAndDeleteTorrent(torrentId: number, apiBase?: string) {
   await postTorrentControl(torrentId, "delete", apiBase).catch(() => postTorrentControl(torrentId, "forget", apiBase));
 }
 
-async function postTorrentControl(torrentId: number, command: "pause" | "delete" | "forget", apiBase?: string) {
+export type LibraryTorrent = {
+  id: number;
+  name: string;
+  infoHash: string;
+  outputFolder: string;
+  progressBytes: number;
+  totalBytes: number;
+  percent: number;
+  finished: boolean;
+  state?: string;
+};
+
+// Lists every torrent the engine currently knows about, enriched with its
+// download stats. Used by the History page to clean up old downloads.
+export async function listLibraryTorrents(apiBase?: string): Promise<LibraryTorrent[]> {
+  const list = await listTorrents(apiBase);
+  const torrents = list.torrents ?? [];
+
+  return Promise.all(
+    torrents.map(async (torrent) => {
+      let progressBytes = 0;
+      let totalBytes = 0;
+      let finished = false;
+      let state: string | undefined;
+
+      try {
+        const stats = await getTorrentStats(torrent.id, apiBase);
+        progressBytes = Math.max(0, stats.progress_bytes ?? 0);
+        totalBytes = Math.max(0, stats.total_bytes ?? 0);
+        finished = Boolean(stats.finished);
+        state = stats.state;
+      } catch {
+        // Stats are best-effort; still show the torrent so it can be removed.
+      }
+
+      const percent = totalBytes > 0 ? Math.min(100, Math.max(0, (progressBytes / totalBytes) * 100)) : 0;
+
+      return {
+        id: torrent.id,
+        name: torrent.name,
+        infoHash: torrent.info_hash,
+        outputFolder: torrent.output_folder,
+        progressBytes,
+        totalBytes,
+        percent,
+        finished,
+        state
+      };
+    })
+  );
+}
+
+// Stops the engine from downloading/seeding a torrent without removing it, so
+// it can still be resumed later (and remains visible in History).
+export async function pauseTorrent(torrentId: number, apiBase?: string) {
+  await postTorrentControl(torrentId, "pause", apiBase);
+}
+
+export async function resumeTorrent(torrentId: number, apiBase?: string, options: RequestOptions = {}) {
+  throwIfAborted(options.signal);
+
+  let stats = await getTorrentStats(torrentId, apiBase);
+  if (isTorrentStreamReady(stats)) {
+    return;
+  }
+
+  try {
+    await postTorrentControl(torrentId, "start", apiBase);
+  } catch (error) {
+    // The torrent can transition to live between the stats request and /start.
+    stats = await getTorrentStats(torrentId, apiBase);
+    if (isTorrentStreamReady(stats)) {
+      return;
+    }
+
+    throw error;
+  }
+
+  const deadline = Date.now() + TORRENT_START_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    throwIfAborted(options.signal);
+
+    stats = await getTorrentStats(torrentId, apiBase);
+    const state = stats.state?.toLowerCase();
+
+    if (stats.error || state === "error") {
+      throw new RqbitApiError(stats.error ?? "Torrent engine could not resume this torrent.");
+    }
+
+    if (isTorrentStreamReady(stats)) {
+      return;
+    }
+
+    await delay(TORRENT_START_POLL_INTERVAL_MS, options.signal);
+  }
+
+  throw new RqbitApiError("Torrent engine is still preparing the stream. Try Play again.");
+}
+
+function isTorrentStreamReady(stats: RqbitTorrentStatsResponse) {
+  return Boolean(stats.finished) || stats.state?.toLowerCase() === "live";
+}
+
+// Removes a torrent from the engine. When deleteFiles is true the downloaded
+// data is removed from disk as well; otherwise the files are kept.
+export async function removeTorrent(torrentId: number, apiBase: string | undefined, deleteFiles: boolean) {
+  await postTorrentControl(torrentId, "pause", apiBase).catch(() => undefined);
+  await postTorrentControl(torrentId, deleteFiles ? "delete" : "forget", apiBase);
+}
+
+async function postTorrentControl(torrentId: number, command: "start" | "pause" | "delete" | "forget", apiBase?: string) {
   const response = await fetchWithTimeout(
     `${apiBase ?? DEFAULT_API_BASE}/torrents/${torrentId}/${command}`,
     {
@@ -355,7 +613,16 @@ function formatDownloadSpeed(mbps?: number) {
   return `${Math.max(1, Math.round(mbps * 1024))} KB/s`;
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit | undefined, timeoutMs: number) {
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit | undefined,
+  timeoutMs: number
+): Promise<RqbitHttpResponse> {
+  if (isTauriRuntime()) {
+    // The Rust proxy command applies its own request timeout.
+    return requestRqbit(url, init);
+  }
+
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
 
@@ -375,8 +642,24 @@ async function fetchWithTimeout(url: string, init: RequestInit | undefined, time
   }
 }
 
-function delay(milliseconds: number) {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, milliseconds);
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new DOMException("Stopped current torrent load.", "AbortError");
+  }
+}
+
+function delay(milliseconds: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      signal?.removeEventListener("abort", handleAbort);
+      resolve();
+    }, milliseconds);
+
+    function handleAbort() {
+      window.clearTimeout(timeout);
+      reject(new DOMException("Stopped current torrent load.", "AbortError"));
+    }
+
+    signal?.addEventListener("abort", handleAbort, { once: true });
   });
 }
