@@ -433,6 +433,7 @@ function getErrorMessage(error: unknown) {
 function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const activeLoadAbortRef = useRef<AbortController | null>(null);
+  const activeTorrentIdRef = useRef<number | null>(null);
   const stoppedLoadControllersRef = useRef<WeakSet<AbortController>>(new WeakSet());
   const [torrentInput, setTorrentInput] = useState("");
   const [metadataState, setMetadataState] = useState<MetadataState>("idle");
@@ -826,6 +827,7 @@ function App() {
     }
 
     activeLoadAbortRef.current = null;
+    activeTorrentIdRef.current = null;
     setStreamUrl(null);
     setSession(null);
     setDownloadProgress(null);
@@ -838,7 +840,7 @@ function App() {
   // it no longer downloads/seeds in the background. The torrent stays in the
   // engine and remains visible in History for later cleanup or resume.
   async function stopStreamingAndTorrent() {
-    const torrentId = session?.torrentId;
+    const torrentId = activeTorrentIdRef.current ?? session?.torrentId;
     const activeEngineBaseUrl = engineBaseUrl ?? undefined;
     const controller = activeLoadAbortRef.current;
 
@@ -854,8 +856,10 @@ function App() {
       setMetadataState(session ? "ready" : "stopped");
 
       if (typeof torrentId === "number") {
-        await pauseTorrent(torrentId, activeEngineBaseUrl).catch(() => undefined);
+        await pauseTorrent(torrentId, activeEngineBaseUrl);
       }
+    } catch (error) {
+      setVideoError(`Could not stop the torrent engine: ${getErrorMessage(error)}`);
     } finally {
       setIsStoppingTorrent(false);
     }
@@ -1411,6 +1415,7 @@ function App() {
     const normalizedInput = (sourceOverride ?? torrentInput).trim();
     let controller: AbortController | null = null;
 
+    activeTorrentIdRef.current = null;
     setStreamUrl(null);
     setErrorMessage(null);
     setDownloadProgress(null);
@@ -1528,23 +1533,39 @@ function App() {
       setVideoError(null);
       setEngineBaseUrl(activeEngineBaseUrl);
 
-      const response = await startTorrentDownload(
-        normalizedInput,
-        [fileToPlay.name, ...subtitleFiles.map((file) => file.name)],
-        activeEngineBaseUrl,
-        { signal: controller.signal }
-      );
+      let torrentId = activeSession.torrentId;
+      let seenPeers = activeSession.seenPeers;
+      const canResumeExistingTorrent =
+        typeof torrentId === "number" && activeTorrentIdRef.current === torrentId;
 
-      if (controller.signal.aborted) {
-        throw new DOMException("Stopped current torrent load.", "AbortError");
+      // A stopped session already owns an rqbit torrent. Resume that exact
+      // handle instead of adding the magnet again, which can reinitialize the
+      // bundled release sidecar and race the following /start request.
+      if (!canResumeExistingTorrent) {
+        const response = await startTorrentDownload(
+          normalizedInput,
+          [fileToPlay.name, ...subtitleFiles.map((file) => file.name)],
+          activeEngineBaseUrl,
+          { signal: controller.signal }
+        );
+
+        if (controller.signal.aborted) {
+          throw new DOMException("Stopped current torrent load.", "AbortError");
+        }
+
+        torrentId = response.id ?? response.details.id ?? undefined;
+        seenPeers = response.seen_peers?.length ?? activeSession.seenPeers;
+
+        if (typeof torrentId !== "number") {
+          throw new Error("Torrent engine did not return a streamable torrent id.");
+        }
       }
-
-      const torrentId = response.id ?? response.details.id;
 
       if (typeof torrentId !== "number") {
-        throw new Error("Torrent engine did not return a streamable torrent id.");
+        throw new Error("Torrent session lost its engine id.");
       }
 
+      activeTorrentIdRef.current = torrentId;
       await resumeTorrent(torrentId, activeEngineBaseUrl, { signal: controller.signal });
 
       if (controller.signal.aborted) {
@@ -1556,7 +1577,7 @@ function App() {
       setSession({
         ...activeSession,
         torrentId,
-        seenPeers: response.seen_peers?.length ?? activeSession.seenPeers
+        seenPeers
       });
       setDownloadProgress(null);
       setVideoError(null);
