@@ -530,16 +530,21 @@ export async function resumeTorrent(torrentId: number, apiBase?: string, options
     return;
   }
 
-  try {
-    await postTorrentControl(torrentId, "start", apiBase);
-  } catch (error) {
-    // The torrent can transition to live between the stats request and /start.
-    stats = await getTorrentStats(torrentId, apiBase);
-    if (isTorrentStreamReady(stats)) {
-      return;
-    }
+  if (!isTorrentStarting(stats)) {
+    try {
+      await postTorrentControl(torrentId, "start", apiBase);
+    } catch (error) {
+      // The torrent can transition to live or initializing between the stats
+      // request and /start. Both states mean rqbit is already doing the work.
+      stats = await getTorrentStats(torrentId, apiBase);
+      if (isTorrentStreamReady(stats)) {
+        return;
+      }
 
-    throw error;
+      if (!isTorrentStarting(stats)) {
+        throw error;
+      }
+    }
   }
 
   const deadline = Date.now() + TORRENT_START_TIMEOUT_MS;
@@ -566,6 +571,11 @@ export async function resumeTorrent(torrentId: number, apiBase?: string, options
 
 function isTorrentStreamReady(stats: RqbitTorrentStatsResponse) {
   return Boolean(stats.finished) || stats.state?.toLowerCase() === "live";
+}
+
+function isTorrentStarting(stats: RqbitTorrentStatsResponse) {
+  const state = stats.state?.toLowerCase();
+  return state === "initializing" || state === "starting";
 }
 
 // Removes a torrent from the engine. When deleteFiles is true the downloaded

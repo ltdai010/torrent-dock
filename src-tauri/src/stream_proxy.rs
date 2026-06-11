@@ -100,12 +100,23 @@ async fn build_stream_response(request: &Request<Vec<u8>>) -> Result<Response<Ve
     let start = parse_range_start(requested_range.as_deref()).unwrap_or(0);
     let end = start.saturating_add(STREAM_CHUNK_SIZE).saturating_sub(1);
 
-    let upstream = shared_client()
-        .get(&target)
-        .header(reqwest::header::RANGE, format!("bytes={start}-{end}"))
-        .send()
-        .await
-        .map_err(|error| format!("stream request failed: {error}"))?;
+    let bounded_range = format!("bytes={start}-{end}");
+    let mut upstream = send_range_request(&target, &bounded_range).await?;
+
+    // WebView2 reads the MP4 `moov` atom by issuing an open-ended range near
+    // the end of the file. Our fixed chunk can extend beyond the exact file
+    // length, and rqbit rejects that with 416 instead of clamping it. Retry
+    // the original open-ended range; because this only happens for the final
+    // chunk, the response remains small and does not buffer the whole movie.
+    if upstream.status() == StatusCode::RANGE_NOT_SATISFIABLE
+        && requested_range.as_deref().is_some_and(is_open_ended_range)
+    {
+        let retry_range = requested_range.as_deref().unwrap_or_default();
+        log_line(&format!(
+            "[stream] retrying final open-ended range {retry_range} after rqbit rejected {bounded_range}"
+        ));
+        upstream = send_range_request(&target, retry_range).await?;
+    }
 
     let upstream_status = upstream.status();
     let content_type = header_string(
@@ -159,6 +170,15 @@ async fn build_stream_response(request: &Request<Vec<u8>>) -> Result<Response<Ve
         .map_err(|error| format!("failed to build stream response: {error}"))
 }
 
+async fn send_range_request(target: &str, range: &str) -> Result<reqwest::Response, String> {
+    shared_client()
+        .get(target)
+        .header(reqwest::header::RANGE, range)
+        .send()
+        .await
+        .map_err(|error| format!("stream request failed: {error}"))
+}
+
 fn error_response(message: &str) -> Response<Vec<u8>> {
     Response::builder()
         .status(StatusCode::BAD_GATEWAY)
@@ -187,4 +207,28 @@ fn parse_range_start(range: Option<&str>) -> Option<u64> {
         .trim()
         .parse::<u64>()
         .ok()
+}
+
+fn is_open_ended_range(range: &str) -> bool {
+    range
+        .strip_prefix("bytes=")
+        .and_then(|value| value.split_once('-'))
+        .is_some_and(|(start, end)| !start.trim().is_empty() && end.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_open_ended_range, parse_range_start};
+
+    #[test]
+    fn recognizes_open_ended_media_ranges() {
+        assert!(is_open_ended_range("bytes=1991344128-"));
+        assert!(!is_open_ended_range("bytes=0-4194303"));
+        assert!(!is_open_ended_range("bytes=-4096"));
+    }
+
+    #[test]
+    fn parses_range_start() {
+        assert_eq!(parse_range_start(Some("bytes=1991344128-")), Some(1991344128));
+    }
 }
