@@ -44,7 +44,7 @@ Do not push TorrentDock work while `hieunguyenthio` or another GitHub account is
 - Do not push directly to `main`.
 - Open PRs against `main`.
 - Stage only files related to the requested TorrentDock change.
-- Do not commit generated folders such as `node_modules/`, `dist/`, or `src-tauri/target/`.
+- Do not commit generated folders such as `node_modules/`, `dist/`, or `release-electron/`.
 
 ## Verification
 
@@ -64,7 +64,6 @@ When Docker is unavailable, run the host checks:
 
 ```powershell
 npm run build
+npm run electron:verify-media
 npm audit
 ```
-
-For Rust/Tauri backend changes, run `npm run tauri:check` or `cargo check --manifest-path src-tauri/Cargo.toml` when Cargo is available on PATH.

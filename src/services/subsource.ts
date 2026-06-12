@@ -1,27 +1,17 @@
-import { invoke } from "@tauri-apps/api/core";
 import { decodeSubtitleBytes } from "./subtitleArchives";
-
-declare global {
-  interface Window {
-    __TAURI_INTERNALS__?: unknown;
-  }
-}
+import { invokeCommand, isDesktopRuntime } from "./desktopRuntime";
 
 const SUBSOURCE_API_BASE = import.meta.env.DEV ? "/source-proxy/subsource-api" : "https://api.subsource.net";
 const SUBSOURCE_RESULT_LIMIT = 24;
 
 type SubSourceApiResponse = { status: number; ok: boolean; body: string };
 
-function isTauriRuntime() {
-  return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
-}
-
 // SubSource is unreachable from the packaged webview (cross-origin + the
 // X-API-Key header forces a CORS preflight the site rejects), so requests go
-// through Rust in the Tauri runtime. The Vite proxy still handles browser dev.
+// through the desktop runtime. The Vite proxy still handles browser dev.
 async function subSourceGetJson<T>(path: string, apiKey: string, fallbackError: string, signal?: AbortSignal): Promise<T> {
-  if (isTauriRuntime()) {
-    const result = await invoke<SubSourceApiResponse>("subsource_api_get", { path, apiKey });
+  if (isDesktopRuntime()) {
+    const result = await invokeCommand<SubSourceApiResponse>("subsource_api_get", { path, apiKey });
 
     if (!result.ok) {
       throw new Error(parseSubSourceError(result.body, fallbackError));
@@ -150,9 +140,9 @@ export async function searchSubSourceSubtitles(options: SearchSubSourceSubtitles
 export async function downloadSubSourceSubtitle(candidate: SubSourceSubtitleCandidate, apiKey: string, signal?: AbortSignal) {
   const normalizedApiKey = getSubSourceApiKey(apiKey);
 
-  if (isTauriRuntime()) {
+  if (isDesktopRuntime()) {
     const bytes = new Uint8Array(
-      await invoke<number[]>("subsource_download", {
+      await invokeCommand<number[]>("subsource_download", {
         subtitleId: candidate.subtitleId,
         apiKey: normalizedApiKey
       })

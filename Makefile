@@ -1,20 +1,19 @@
-MAC_TARGET ?= $(shell rustc --print host-tuple)
+MAC_TARGET ?= universal-apple-darwin
 
 .PHONY: mac-prepare mac-check mac-dev mac-build mac-build-universal
 
 mac-prepare:
 	npm run sidecar:prepare -- --target $(MAC_TARGET)
-	npm run mpv:verify
 
 mac-check:
 	npm run build
-	cargo check --manifest-path src-tauri/Cargo.toml
+	npm run electron:verify-runtime
 
 mac-dev: mac-prepare
-	npm run tauri:dev
+	npm run electron:dev
 
 mac-build: mac-prepare
-	npm run tauri:build -- --target $(MAC_TARGET)
+	npm run electron:build:mac
 
 mac-build-universal:
 	$(MAKE) mac-build MAC_TARGET=universal-apple-darwin

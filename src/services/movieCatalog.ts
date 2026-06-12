@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeCommand, isDesktopRuntime } from "./desktopRuntime";
 
 const CATALOG_RESULT_LIMIT = 8;
 
@@ -28,16 +28,6 @@ type ImdbSuggestionItem = {
   };
 };
 
-declare global {
-  interface Window {
-    __TAURI_INTERNALS__?: unknown;
-  }
-}
-
-function isTauriRuntime() {
-  return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
-}
-
 export async function searchMovieTitles(query: string): Promise<MovieTitleCandidate[]> {
   const normalizedQuery = normalizeCatalogQuery(query);
 
@@ -45,8 +35,8 @@ export async function searchMovieTitles(query: string): Promise<MovieTitleCandid
     throw new Error("Enter at least 2 characters to find title matches.");
   }
 
-  if (isTauriRuntime()) {
-    return invoke<MovieTitleCandidate[]>("search_movie_titles", {
+  if (isDesktopRuntime()) {
+    return invokeCommand<MovieTitleCandidate[]>("search_movie_titles", {
       query: normalizedQuery
     });
   }

@@ -1,5 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
 import type { ProviderResult, ProviderSearchError, ProviderSearchResponse } from "../domain/torrent";
+import { invokeCommand, isDesktopRuntime } from "./desktopRuntime";
 
 const SEARCH_LIMIT_PER_PROVIDER = 8;
 const SOURCE_SCAN_LIMIT_PER_PROVIDER = 24;
@@ -59,16 +59,6 @@ type SearchMatchProfile = {
   yearTokens: string[];
 };
 
-declare global {
-  interface Window {
-    __TAURI_INTERNALS__?: unknown;
-  }
-}
-
-function isTauriRuntime() {
-  return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
-}
-
 export function getProviderResultSource(result: ProviderResult) {
   return result.magnetUri ?? result.torrentUrl ?? null;
 }
@@ -87,14 +77,14 @@ export async function searchTorrentSources(
     throw new Error("Enter at least 2 characters to search sources.");
   }
 
-  if (isTauriRuntime()) {
-    return searchViaTauri(trimmedQuery, options.onProviderSettled);
+  if (isDesktopRuntime()) {
+    return searchViaDesktop(trimmedQuery, options.onProviderSettled);
   }
 
   return searchViaDevProxy(trimmedQuery, options.onProviderSettled);
 }
 
-async function searchViaTauri(
+async function searchViaDesktop(
   query: string,
   onProviderSettled?: SearchTorrentSourcesOptions["onProviderSettled"]
 ): Promise<ProviderSearchResponse> {
@@ -102,7 +92,7 @@ async function searchViaTauri(
     SOURCE_PROVIDERS.map((provider) => ({
       ...provider,
       run: () =>
-        invoke<ProviderResult[]>("search_torrent_source_provider", {
+        invokeCommand<ProviderResult[]>("search_torrent_source_provider", {
           query,
           providerId: provider.providerId
         })

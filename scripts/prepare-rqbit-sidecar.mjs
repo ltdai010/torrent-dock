@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const binariesDir = join(repoRoot, "src-tauri", "binaries");
+const binariesDir = join(repoRoot, "resources", "binaries");
 const releaseApiUrl = "https://api.github.com/repos/ikatson/rqbit/releases/latest";
 
 const assetByTarget = {
@@ -14,6 +14,14 @@ const assetByTarget = {
   "x86_64-apple-darwin": "rqbit-osx-universal",
   "x86_64-pc-windows-msvc": "rqbit.exe",
   "x86_64-unknown-linux-gnu": "rqbit-linux-amd64"
+};
+
+const hostTargetByPlatform = {
+  "darwin-arm64": "aarch64-apple-darwin",
+  "darwin-x64": "x86_64-apple-darwin",
+  "linux-arm64": "aarch64-unknown-linux-gnu",
+  "linux-x64": "x86_64-unknown-linux-gnu",
+  "win32-x64": "x86_64-pc-windows-msvc"
 };
 
 function getRequestedTargetTriple() {
@@ -30,9 +38,7 @@ function getHostTargetTriple() {
   try {
     return execFileSync("rustc", ["--print", "host-tuple"], { encoding: "utf8" }).trim();
   } catch {
-    const rustcVersion = execFileSync("rustc", ["-Vv"], { encoding: "utf8" });
-    const hostLine = rustcVersion.split(/\r?\n/).find((line) => line.startsWith("host:"));
-    return hostLine?.replace("host:", "").trim();
+    return hostTargetByPlatform[`${process.platform}-${process.arch}`];
   }
 }
 

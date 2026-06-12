@@ -1,5 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
 import { decodeSubtitleBytes } from "./subtitleArchives";
+import { invokeCommand, isDesktopRuntime } from "./desktopRuntime";
 
 const OPEN_SUBTITLES_XML_RPC_PROXY = "/source-proxy/opensubtitles-org";
 const OPEN_SUBTITLES_DOWNLOAD_PROXY = "/source-proxy/opensubtitles-download";
@@ -85,12 +85,6 @@ type OpenSubtitlesCredentials = {
   password: string;
   signal?: AbortSignal;
 };
-
-declare global {
-  interface Window {
-    __TAURI_INTERNALS__?: unknown;
-  }
-}
 
 export async function searchOpenSubtitles(options: SearchOpenSubtitlesOptions): Promise<OpenSubtitlesCandidate[]> {
   const token = await login(options.username, options.password, options.signal);
@@ -213,16 +207,16 @@ async function login(username: string, password: string, signal?: AbortSignal) {
 
 async function callXmlRpc(methodName: string, parameters: XmlRpcValue[], signal?: AbortSignal) {
   const body = buildMethodCall(methodName, parameters);
-  const xml = isTauriRuntime()
-    ? await invoke<string>("open_subtitles_org_request", { body })
+  const xml = isDesktopRuntime()
+    ? await invokeCommand<string>("open_subtitles_org_request", { body })
     : await postXmlRpcViaDevProxy(body, signal);
 
   return parseMethodResponse(xml);
 }
 
 async function downloadDirectSubtitleBytes(downloadUrl: string, signal?: AbortSignal) {
-  if (isTauriRuntime()) {
-    return new Uint8Array(await invoke<number[]>("open_subtitles_org_download", { url: downloadUrl }));
+  if (isDesktopRuntime()) {
+    return new Uint8Array(await invokeCommand<number[]>("open_subtitles_org_download", { url: downloadUrl }));
   }
 
   return downloadDirectSubtitleBytesViaDevProxy(downloadUrl, signal);
@@ -482,6 +476,3 @@ function escapeXml(value: string) {
     .replace(/'/g, "&apos;");
 }
 
-function isTauriRuntime() {
-  return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
-}

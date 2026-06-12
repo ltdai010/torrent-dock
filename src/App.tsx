@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, ClipboardEvent, CSSProperties } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import type { ChangeEvent, ClipboardEvent } from "react";
+import videojs from "video.js";
+import type Player from "video.js/dist/types/player";
+import "video.js/dist/video-js.css";
 import {
   AlertTriangle,
   ArrowLeft,
   Captions,
+  ChevronDown,
+  ChevronRight,
   CirclePause,
   Clapperboard,
   Download,
@@ -13,20 +17,13 @@ import {
   ListChecks,
   Loader2,
   Magnet,
-  Maximize2,
-  Minimize2,
-  Minus,
-  Play,
-  Plus,
   RadioTower,
   Search,
   ShieldCheck,
   StepBack,
   StepForward,
   Trash2,
-  Upload,
-  Volume2,
-  VolumeX
+  Upload
 } from "lucide-react";
 import {
   getTorrentDownloadProgress,
@@ -54,35 +51,12 @@ import { formatMovieSearchTitle, sanitizeMediaSearchTitle, searchMovieTitles, ty
 import { downloadSubSourceSubtitle, searchSubSourceSubtitles, type SubSourceSubtitleCandidate } from "./services/subsource";
 import { dedupeProviderResults, getProviderResultSource, searchTorrentSources } from "./services/torrentSources";
 import type { ProviderResult, ProviderSearchError } from "./domain/torrent";
-import {
-  addNativeSubtitleText,
-  initializeNativePlayer,
-  listenNativePlayerEvents,
-  loadNativePlayer,
-  pauseNativePlayer,
-  playNativePlayer,
-  seekNativePlayer,
-  selectNativeAudioTrack,
-  selectNativeSubtitleTrack,
-  setNativePlayerMuted,
-  setNativePlayerRate,
-  setNativePlayerFullscreen,
-  setNativePlayerVolume,
-  setNativeSubtitleDelay,
-  setNativeSubtitleScale,
-  setNativeSurfaceBounds,
-  stopNativePlayer,
-  type NativePlayerTrack,
-  type PlayerCapabilities
-} from "./services/nativePlayer";
 
 type MetadataState = "idle" | "fetching" | "ready" | "starting" | "streaming" | "stopped" | "error";
 type SourceSearchState = "idle" | "searching" | "ready" | "error";
 type CatalogSearchState = "idle" | "searching" | "ready" | "error";
 type OnlineSubtitleSearchState = "idle" | "searching" | "ready" | "loading" | "error";
 type OnlineSubtitleProvider = "subsource" | "opensubtitles";
-type PlaybackBackend = "native" | "html";
-type CursorPosition = { x: number; y: number };
 type OnlineSubtitleCandidate = {
   provider: OnlineSubtitleProvider;
   id: string;
@@ -108,18 +82,6 @@ type TorrentSession = {
 const playableExtensions = new Set([".avi", ".m4v", ".mkv", ".mov", ".mp4", ".ogg", ".ogm", ".ogv", ".webm"]);
 const subtitleExtensions = new Set([".srt", ".vtt"]);
 const subtitleShiftStepSeconds = 0.5;
-const minSubtitleSizePercent = 70;
-const maxSubtitleSizePercent = 180;
-const defaultPlayerCapabilities: PlayerCapabilities = {
-  available: false,
-  backend: "html",
-  platform: "browser",
-  libraryPath: null,
-  reason: "Native playback has not been initialized yet.",
-  supportsNativeSurface: false,
-  supportsEmbeddedTracks: false,
-  supportsExternalSubtitles: false
-};
 const playbackRates = [0.5, 0.75, 1, 1.25, 1.5, 2];
 const onlineSubtitleProviderStorageKey = "torrentdock.onlineSubtitleProvider";
 const subSourceApiKeyStorageKey = "torrentdock.subSourceApiKey";
@@ -196,23 +158,6 @@ function formatPercentage(value: number) {
   return `${value.toFixed(value >= 10 ? 0 : 1)}%`;
 }
 
-function formatPlaybackTime(value: number) {
-  if (!Number.isFinite(value) || value <= 0) {
-    return "00:00";
-  }
-
-  const totalSeconds = Math.floor(value);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-
-  if (hours > 0) {
-    return [hours, minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":");
-  }
-
-  return [minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":");
-}
-
 function formatSubtitleOffset(value: number) {
   if (value === 0) {
     return "0.0s";
@@ -241,6 +186,28 @@ function isPlayable(file: RqbitFile) {
 function fileExtension(fileName: string) {
   const dotIndex = fileName.lastIndexOf(".");
   return dotIndex >= 0 ? fileName.slice(dotIndex).toLowerCase() : "";
+}
+
+function getVideoJsMimeType(fileName: string) {
+  switch (fileExtension(fileName)) {
+    case ".mp4":
+    case ".m4v":
+      return "video/mp4";
+    case ".mov":
+      return "video/quicktime";
+    case ".webm":
+      return "video/webm";
+    case ".ogg":
+    case ".ogm":
+    case ".ogv":
+      return "video/ogg";
+    case ".mkv":
+      return "video/x-matroska";
+    case ".avi":
+      return "video/x-msvideo";
+    default:
+      return undefined;
+  }
 }
 
 function describeMediaError(error: MediaError | null, fileName: string): string {
@@ -476,7 +443,7 @@ function getErrorMessage(error: unknown) {
     return error.message;
   }
 
-  // Tauri command rejections arrive as plain strings, not Error instances.
+  // Desktop command rejections can arrive as plain strings, not Error instances.
   if (typeof error === "string" && error.trim().length > 0) {
     return error;
   }
@@ -485,15 +452,12 @@ function getErrorMessage(error: unknown) {
 }
 
 function App() {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const videoJsHostRef = useRef<HTMLDivElement | null>(null);
+  const videoJsPlayerRef = useRef<Player | null>(null);
   const playerPanelRef = useRef<HTMLElement | null>(null);
-  const videoSurfaceRef = useRef<HTMLDivElement | null>(null);
-  const playerToolbarRef = useRef<HTMLDivElement | null>(null);
   const activeLoadAbortRef = useRef<AbortController | null>(null);
   const activeTorrentIdRef = useRef<number | null>(null);
   const stoppedLoadControllersRef = useRef<WeakSet<AbortController>>(new WeakSet());
-  const isNativePlaybackRef = useRef(false);
-  const isPlayerFullscreenRef = useRef(false);
   const [torrentInput, setTorrentInput] = useState("");
   const [metadataState, setMetadataState] = useState<MetadataState>("idle");
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
@@ -501,23 +465,13 @@ function App() {
   const [engineBaseUrl, setEngineBaseUrl] = useState<string | null>(null);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [videoError, setVideoError] = useState<string | null>(null);
-  const [nativeCapabilities, setNativeCapabilities] = useState<PlayerCapabilities>(defaultPlayerCapabilities);
-  const [playbackBackend, setPlaybackBackend] = useState<PlaybackBackend>("native");
   const [playerState, setPlayerState] = useState<"idle" | "loading" | "playing" | "paused" | "stopped" | "ended">("idle");
   const [playerTime, setPlayerTime] = useState(0);
   const [playerDuration, setPlayerDuration] = useState(0);
-  const [isPlayerBuffering, setIsPlayerBuffering] = useState(false);
   const [playerVolume, setPlayerVolume] = useState(100);
   const [isPlayerMuted, setIsPlayerMuted] = useState(false);
   const [playerRate, setPlayerRate] = useState(1);
-  const [playerTracks, setPlayerTracks] = useState<NativePlayerTrack[]>([]);
-  const [selectedAudioTrackId, setSelectedAudioTrackId] = useState<number | null>(null);
-  const [selectedSubtitleTrackId, setSelectedSubtitleTrackId] = useState<number | null>(null);
-  const [isPlayerFullscreen, setIsPlayerFullscreen] = useState(false);
-  const [playerControlsVisible, setPlayerControlsVisible] = useState(true);
-  const [pendingSeekTime, setPendingSeekTime] = useState<number | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<TorrentDownloadProgress | null>(null);
-  const [surfaceSyncNonce, setSurfaceSyncNonce] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [sourceQuery, setSourceQuery] = useState("");
   const [sourceSearchState, setSourceSearchState] = useState<SourceSearchState>("idle");
@@ -533,7 +487,6 @@ function App() {
   const [subtitleFileName, setSubtitleFileName] = useState<string | null>(null);
   const [subtitleTrackUrl, setSubtitleTrackUrl] = useState<string | null>(null);
   const [subtitleOffsetSeconds, setSubtitleOffsetSeconds] = useState(0);
-  const [subtitleSizePercent, setSubtitleSizePercent] = useState(100);
   const [subtitleError, setSubtitleError] = useState<string | null>(null);
   const [subtitleLoadingFileIndex, setSubtitleLoadingFileIndex] = useState<number | null>(null);
   const [onlineSubtitleProvider, setOnlineSubtitleProvider] = useState<OnlineSubtitleProvider>(() => {
@@ -550,6 +503,8 @@ function App() {
   const [onlineSubtitleError, setOnlineSubtitleError] = useState<string | null>(null);
   const [onlineSubtitleLoadingResultId, setOnlineSubtitleLoadingResultId] = useState<string | null>(null);
   const [activeOnlineResultId, setActiveOnlineResultId] = useState<string | null>(null);
+  const [isSubtitleProviderExpanded, setIsSubtitleProviderExpanded] = useState(true);
+  const [isSubtitleListExpanded, setIsSubtitleListExpanded] = useState(true);
   const [showHistory, setShowHistory] = useState(false);
   const [historyItems, setHistoryItems] = useState<LibraryTorrent[]>([]);
   const [historyState, setHistoryState] = useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -560,10 +515,6 @@ function App() {
   const playableFiles = useMemo(() => session?.files.filter(isPlayable) ?? [], [session]);
   const subtitleFiles = useMemo(() => session?.files.filter(isSubtitleFile) ?? [], [session]);
   const selectedFile = playableFiles[selectedFileIndex] ?? playableFiles[0];
-  const isNativeAvailable = nativeCapabilities.available;
-  const isNativePlayback = playbackBackend === "native" && isNativeAvailable;
-  const audioTracks = useMemo(() => playerTracks.filter((track) => track.kind === "audio"), [playerTracks]);
-  const embeddedSubtitleTracks = useMemo(() => playerTracks.filter((track) => track.kind === "subtitle"), [playerTracks]);
   const isTorrentLoading = metadataState === "fetching" || metadataState === "starting";
   const normalizedEntry = sourceQuery.trim();
   const entryIsTorrentSource = isTorrentSourceInput(normalizedEntry);
@@ -576,12 +527,6 @@ function App() {
     metadataState === "ready" ||
     metadataState === "streaming" ||
     (metadataState === "error" && torrentInput.length > 0);
-  const playerPosition = isNativePlayback ? playerTime : (videoRef.current?.currentTime ?? 0);
-  const rawPlayerLength = isNativePlayback ? playerDuration : (videoRef.current?.duration ?? 0);
-  const playerLength = Number.isFinite(rawPlayerLength) && rawPlayerLength > 0 ? rawPlayerLength : 0;
-  const displayedPlayerPosition = pendingSeekTime ?? playerPosition;
-  const hasKnownPlayerLength = Number.isFinite(playerLength) && playerLength > 0;
-  const playerSeekMax = Math.max(1, Math.round(hasKnownPlayerLength ? playerLength : Math.max(3600, displayedPlayerPosition + 600)));
   const progressPercent = downloadProgress?.percent ?? 0;
   const progressLabel = formatPercentage(progressPercent);
   const progressBytesLabel =
@@ -589,212 +534,13 @@ function App() {
       ? `${formatBytes(downloadProgress.progressBytes)} / ${formatBytes(downloadProgress.totalBytes)}`
       : "Waiting for stats";
   const downloadSpeedLabel = streamUrl ? (downloadProgress?.downloadSpeedLabel ?? "0 B/s") : "idle";
-  const subtitleStyle = { "--subtitle-size": `${subtitleSizePercent}%` } as CSSProperties;
   const selectedCatalogSearchTitle = selectedCatalogTitle?.searchTitle;
+  const subtitleListCount = onlineSubtitleResults.length + subtitleFiles.length;
   const viewMode: "search" | "browse" | "player" = shouldShowPlayer
     ? "player"
     : selectedCatalogTitle
       ? "browse"
       : "search";
-
-  useEffect(() => {
-    isNativePlaybackRef.current = isNativePlayback;
-  }, [isNativePlayback]);
-
-  useEffect(() => {
-    isPlayerFullscreenRef.current = isPlayerFullscreen;
-  }, [isPlayerFullscreen]);
-
-  useEffect(() => {
-    let cleanup: (() => void) | undefined;
-    let isMounted = true;
-
-    void listenNativePlayerEvents({
-      onState: (state) => {
-        if (state === "playing" || state === "paused") {
-          setPlayerState(state);
-        }
-      },
-      onTime: (value) => {
-        setPlayerTime(value);
-      },
-      onDuration: (value) => {
-        if (Number.isFinite(value) && value > 0) {
-          setPlayerDuration(value);
-        } else {
-          setPlayerDuration(0);
-        }
-      },
-      onBuffering: setIsPlayerBuffering,
-      onTracks: setPlayerTracks,
-      onEnd: () => {
-        setPlayerState("ended");
-        setMetadataState((currentState) => (currentState === "streaming" ? "ready" : currentState));
-      },
-      onWarning: setVideoError,
-      onError: (message) => {
-        setVideoError(message);
-        setMetadataState("ready");
-      }
-    }).then((unlisten) => {
-      if (isMounted) {
-        cleanup = unlisten;
-      } else {
-        unlisten();
-      }
-    });
-
-    return () => {
-      isMounted = false;
-      cleanup?.();
-    };
-  }, []);
-
-  useEffect(() => {
-    const selectedAudio = audioTracks.find((track) => track.selected);
-    const selectedSubtitle = embeddedSubtitleTracks.find((track) => track.selected);
-    setSelectedAudioTrackId(selectedAudio?.id ?? null);
-    setSelectedSubtitleTrackId(selectedSubtitle?.id ?? null);
-  }, [audioTracks, embeddedSubtitleTracks]);
-
-  useEffect(() => {
-    if (!isNativePlayback || !streamUrl || viewMode !== "player") {
-      if (isNativeAvailable) {
-        void setNativeSurfaceBounds({ x: 0, y: 0, width: 1, height: 1 }, window.devicePixelRatio || 1, false).catch(() => undefined);
-      }
-      return undefined;
-    }
-
-    const element = videoSurfaceRef.current;
-
-    if (!element) {
-      return undefined;
-    }
-
-    let frameId = 0;
-    const syncSurface = () => {
-      window.cancelAnimationFrame(frameId);
-      frameId = window.requestAnimationFrame(() => {
-        const rect = element.getBoundingClientRect();
-        const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
-        const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
-        const left = Math.max(0, rect.left);
-        const top = Math.max(0, rect.top);
-        const right = Math.min(viewportWidth, rect.right);
-        const toolbarHeight =
-          isPlayerFullscreenRef.current && playerControlsVisible ? (playerToolbarRef.current?.getBoundingClientRect().height ?? 0) + 28 : 0;
-        const bottom = Math.max(top, Math.min(viewportHeight, rect.bottom) - toolbarHeight);
-        const width = Math.max(0, right - left);
-        const height = Math.max(0, bottom - top);
-        const visible =
-          metadataState === "streaming" &&
-          Boolean(streamUrl) &&
-          width >= 16 &&
-          height >= 16 &&
-          rect.bottom > 0 &&
-          rect.right > 0 &&
-          rect.top < viewportHeight &&
-          rect.left < viewportWidth;
-
-        void setNativeSurfaceBounds(
-          {
-            x: left,
-            y: top,
-            width,
-            height
-          },
-          1,
-          visible
-        ).catch(setVideoError);
-      });
-    };
-
-    const resizeObserver = new ResizeObserver(syncSurface);
-    resizeObserver.observe(element);
-    syncSurface();
-    window.addEventListener("resize", syncSurface);
-    window.addEventListener("scroll", syncSurface, true);
-    window.visualViewport?.addEventListener("resize", syncSurface);
-    window.visualViewport?.addEventListener("scroll", syncSurface);
-
-    return () => {
-      resizeObserver.disconnect();
-      window.removeEventListener("resize", syncSurface);
-      window.removeEventListener("scroll", syncSurface, true);
-      window.visualViewport?.removeEventListener("resize", syncSurface);
-      window.visualViewport?.removeEventListener("scroll", syncSurface);
-      window.cancelAnimationFrame(frameId);
-    };
-  }, [isNativeAvailable, isNativePlayback, metadataState, streamUrl, viewMode, isPlayerFullscreen, playerControlsVisible, surfaceSyncNonce]);
-
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      const fullscreen = document.fullscreenElement === playerPanelRef.current;
-      isPlayerFullscreenRef.current = fullscreen;
-      setIsPlayerFullscreen(fullscreen);
-      setPlayerControlsVisible(true);
-      requestSurfaceResync();
-      window.setTimeout(requestSurfaceResync, 160);
-      window.setTimeout(requestSurfaceResync, 420);
-
-      if (isNativePlaybackRef.current && !fullscreen) {
-        void setNativePlayerFullscreen(false).catch(() => undefined);
-      }
-    };
-
-    document.addEventListener("fullscreenchange", handleFullscreenChange);
-    return () => {
-      document.removeEventListener("fullscreenchange", handleFullscreenChange);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!isPlayerFullscreen) {
-      setPlayerControlsVisible(true);
-      return undefined;
-    }
-
-    let hideTimer = window.setTimeout(() => setPlayerControlsVisible(false), 2200);
-    const showControls = () => {
-      setPlayerControlsVisible(true);
-      window.clearTimeout(hideTimer);
-      hideTimer = window.setTimeout(() => setPlayerControlsVisible(false), 2200);
-    };
-
-    const panel = playerPanelRef.current;
-    let lastCursor: CursorPosition | null = null;
-    panel?.addEventListener("mousemove", showControls);
-    panel?.addEventListener("pointerdown", showControls);
-    panel?.addEventListener("focusin", showControls);
-    document.addEventListener("mousemove", showControls);
-    document.addEventListener("pointermove", showControls);
-    document.addEventListener("keydown", showControls);
-    const cursorPoll = window.setInterval(() => {
-      void invoke<CursorPosition | null>("get_cursor_position")
-        .then((position) => {
-          if (!position) {
-            return;
-          }
-
-          if (lastCursor && (lastCursor.x !== position.x || lastCursor.y !== position.y)) {
-            showControls();
-          }
-          lastCursor = position;
-        })
-        .catch(() => undefined);
-    }, 160);
-
-    return () => {
-      window.clearTimeout(hideTimer);
-      window.clearInterval(cursorPoll);
-      panel?.removeEventListener("mousemove", showControls);
-      panel?.removeEventListener("pointerdown", showControls);
-      panel?.removeEventListener("focusin", showControls);
-      document.removeEventListener("mousemove", showControls);
-      document.removeEventListener("pointermove", showControls);
-      document.removeEventListener("keydown", showControls);
-    };
-  }, [isPlayerFullscreen]);
 
   useEffect(() => {
     window.localStorage.setItem(onlineSubtitleProviderStorageKey, onlineSubtitleProvider);
@@ -839,6 +585,7 @@ function App() {
   }, [openSubtitlesPassword]);
 
   useEffect(() => {
+    setIsSubtitleProviderExpanded(true);
     setOnlineSubtitleSearchState("idle");
     setOnlineSubtitleError(null);
     setOnlineSubtitleResults([]);
@@ -873,56 +620,140 @@ function App() {
   }, [subtitleOffsetSeconds, subtitleRawText]);
 
   useEffect(() => {
-    if (!subtitleTrackUrl) {
+    const host = videoJsHostRef.current;
+
+    if (!streamUrl || !host) {
       return undefined;
     }
 
-    const timeout = window.setTimeout(() => {
-      const tracks = videoRef.current?.textTracks;
+    host.innerHTML = "";
+    const video = document.createElement("video-js");
+    video.classList.add("video-js", "vjs-big-play-centered", "torrentdock-video-js");
+    video.setAttribute("controls", "true");
+    video.setAttribute("playsinline", "true");
+    video.setAttribute("preload", "auto");
+    host.appendChild(video);
 
-      if (!tracks) {
-        return;
-      }
+    const fileName = selectedFile ? getFileName(selectedFile) : session?.name ?? "";
+    const source = {
+      src: streamUrl,
+      type: getVideoJsMimeType(fileName)
+    };
+    const player = videojs(video, {
+      autoplay: true,
+      bigPlayButton: true,
+      controls: true,
+      fill: true,
+      fluid: false,
+      html5: {
+        nativeTextTracks: false
+      },
+      persistTextTrackSettings: true,
+      playbackRates,
+      preload: "auto",
+      responsive: true,
+      sources: [source]
+    });
+    videoJsPlayerRef.current = player;
 
-      for (const track of Array.from(tracks)) {
-        track.mode = track.kind === "subtitles" || track.kind === "captions" ? "showing" : "disabled";
+    const syncPlayer = () => syncHtmlPlaybackState();
+    const syncVolume = () => {
+      const volume = player.volume();
+      const muted = player.muted();
+      setPlayerVolume(Math.round((typeof volume === "number" ? volume : 0) * 100));
+      setIsPlayerMuted(Boolean(muted));
+    };
+    const syncRate = () => {
+      const rate = player.playbackRate();
+      if (typeof rate === "number") {
+        setPlayerRate(rate);
       }
-    }, 0);
+    };
+    const handleError = () => {
+      const tech = player.tech({ IWillNotUseThisInPlugins: true })?.el() as HTMLVideoElement | undefined;
+      const mediaError = tech?.error ?? null;
+      const videoJsError = player.error();
+      setVideoError(videoJsError?.message || describeMediaError(mediaError, selectedFile ? getFileName(selectedFile) : session?.name ?? ""));
+      setStreamUrl(null);
+      setMetadataState("ready");
+    };
+
+    player.on("play", syncPlayer);
+    player.on("pause", syncPlayer);
+    player.on("timeupdate", syncPlayer);
+    player.on("loadedmetadata", syncPlayer);
+    player.on("durationchange", syncPlayer);
+    player.on("volumechange", syncVolume);
+    player.on("ratechange", syncRate);
+    player.on("error", handleError);
+
+    player.ready(() => {
+      player.volume(playerVolume / 100);
+      player.muted(isPlayerMuted);
+      player.playbackRate(playerRate);
+      const playResult = player.play();
+      if (playResult) {
+        void playResult.catch((error: unknown) => {
+          if (
+            error instanceof DOMException &&
+            (error.name === "NotAllowedError" || error.name === "NotSupportedError" || error.name === "AbortError")
+          ) {
+            return;
+          }
+
+          setVideoError(getErrorMessage(error));
+        });
+      }
+    });
 
     return () => {
-      window.clearTimeout(timeout);
+      player.dispose();
+      if (videoJsPlayerRef.current === player) {
+        videoJsPlayerRef.current = null;
+      }
+      host.innerHTML = "";
+    };
+  }, [selectedFile, session?.name, streamUrl]);
+
+  useEffect(() => {
+    if (!streamUrl || !subtitleTrackUrl) {
+      return undefined;
+    }
+
+    const player = videoJsPlayerRef.current;
+
+    if (!player) {
+      return undefined;
+    }
+
+    const remoteTracks = player.remoteTextTracks();
+    for (let index = remoteTracks.length - 1; index >= 0; index -= 1) {
+      const track = (remoteTracks as unknown as { [index: number]: TextTrack })[index];
+      if (track) {
+        player.removeRemoteTextTrack(track);
+      }
+    }
+
+    const trackElement = player.addRemoteTextTrack(
+      {
+        kind: "subtitles",
+        src: subtitleTrackUrl,
+        srclang: "en",
+        label: subtitleFileName ?? "Custom subtitles",
+        default: true
+      },
+      false
+    ) as unknown as HTMLTrackElement & { track: TextTrack };
+    const textTrack = trackElement.track;
+    const onLoad = () => showSubtitleTrack(textTrack);
+    trackElement.addEventListener("load", onLoad);
+    showSubtitleTrack(textTrack);
+
+    return () => {
+      trackElement.removeEventListener("load", onLoad);
+      player.removeRemoteTextTrack(textTrack);
     };
   }, [streamUrl, subtitleFileName, subtitleTrackUrl]);
-
-  useEffect(() => {
-    if (!isNativePlayback || !streamUrl || !subtitleRawText || !subtitleFileName) {
-      return;
-    }
-
-    void addNativeSubtitleText(subtitleFileName, subtitleRawText).catch((error: unknown) => {
-      setSubtitleError(getErrorMessage(error));
-    });
-  }, [isNativePlayback, streamUrl, subtitleFileName, subtitleRawText]);
-
-  useEffect(() => {
-    if (!isNativePlayback || !streamUrl) {
-      return;
-    }
-
-    void setNativeSubtitleDelay(subtitleOffsetSeconds).catch((error: unknown) => {
-      setSubtitleError(getErrorMessage(error));
-    });
-  }, [isNativePlayback, streamUrl, subtitleOffsetSeconds]);
-
-  useEffect(() => {
-    if (!isNativePlayback || !streamUrl) {
-      return;
-    }
-
-    void setNativeSubtitleScale(subtitleSizePercent / 100).catch((error: unknown) => {
-      setSubtitleError(getErrorMessage(error));
-    });
-  }, [isNativePlayback, streamUrl, subtitleSizePercent]);
 
   useEffect(() => {
     if (!engineBaseUrl || typeof session?.torrentId !== "number" || !streamUrl) {
@@ -1140,16 +971,11 @@ function App() {
 
     activeLoadAbortRef.current = null;
     activeTorrentIdRef.current = null;
-    if (isNativeAvailable) {
-      void stopNativePlayer().catch(() => undefined);
-    }
+    videoJsPlayerRef.current?.pause();
     setStreamUrl(null);
     setPlayerState("stopped");
     setPlayerTime(0);
     setPlayerDuration(0);
-    setPendingSeekTime(null);
-    setIsPlayerFullscreen(false);
-    setPlayerTracks([]);
     setSession(null);
     setSelectedFileIndex(0);
     setMetadataState("stopped");
@@ -1160,11 +986,7 @@ function App() {
     activeLoadAbortRef.current?.abort();
     activeLoadAbortRef.current = null;
 
-    if (isNativeAvailable) {
-      void stopNativePlayer().catch(() => undefined);
-    }
-
-    videoRef.current?.pause();
+    videoJsPlayerRef.current?.pause();
 
     if (document.fullscreenElement === playerPanelRef.current) {
       void document.exitFullscreen().catch(() => undefined);
@@ -1174,10 +996,6 @@ function App() {
     setPlayerState("stopped");
     setPlayerTime(0);
     setPlayerDuration(0);
-    setPendingSeekTime(null);
-    setIsPlayerFullscreen(false);
-    setIsPlayerBuffering(false);
-    setPlayerTracks([]);
     setDownloadProgress(null);
   }
 
@@ -1579,12 +1397,14 @@ function App() {
     const selectedProvider = onlineSubtitleProvider;
 
     if (selectedProvider === "subsource" && !subSourceApiKey.trim()) {
+      setIsSubtitleProviderExpanded(true);
       setOnlineSubtitleSearchState("error");
       setOnlineSubtitleError("Add a SubSource API key first.");
       return;
     }
 
     if (selectedProvider === "opensubtitles" && (!openSubtitlesUsername.trim() || !openSubtitlesPassword)) {
+      setIsSubtitleProviderExpanded(true);
       setOnlineSubtitleSearchState("error");
       setOnlineSubtitleError("Add your OpenSubtitles.org username and password first.");
       return;
@@ -1597,6 +1417,7 @@ function App() {
     }
 
     try {
+      setIsSubtitleProviderExpanded(true);
       setOnlineSubtitleSearchState("searching");
       setOnlineSubtitleError(null);
       setOnlineSubtitleResults([]);
@@ -1628,7 +1449,10 @@ function App() {
       }
 
       setOnlineSubtitleSearchState("ready");
+      setIsSubtitleProviderExpanded(false);
+      setIsSubtitleListExpanded(true);
     } catch (error) {
+      setIsSubtitleProviderExpanded(true);
       setOnlineSubtitleResults([]);
       setOnlineSubtitleSearchState("error");
       setOnlineSubtitleError(error instanceof Error ? error.message : "Could not search online subtitles.");
@@ -1722,159 +1546,14 @@ function App() {
   }
 
   function syncHtmlPlaybackState() {
-    const video = videoRef.current;
-
-    if (!video || isNativePlayback) {
-      return;
+    const videoJsPlayer = videoJsPlayerRef.current;
+    if (videoJsPlayer) {
+      const currentTime = videoJsPlayer.currentTime();
+      const duration = videoJsPlayer.duration();
+      setPlayerTime(typeof currentTime === "number" ? currentTime : 0);
+      setPlayerDuration(typeof duration === "number" && Number.isFinite(duration) ? duration : 0);
+      setPlayerState(videoJsPlayer.paused() ? "paused" : "playing");
     }
-
-    setPlayerTime(video.currentTime || 0);
-    setPlayerDuration(Number.isFinite(video.duration) ? video.duration : 0);
-    setPlayerState(video.paused ? "paused" : "playing");
-  }
-
-  async function toggleTransportPlayback() {
-    if (!streamUrl) {
-      return;
-    }
-
-    if (isNativePlayback) {
-      if (playerState === "playing") {
-        await pauseNativePlayer();
-        setPlayerState("paused");
-      } else {
-        await playNativePlayer();
-        setPlayerState("playing");
-      }
-      return;
-    }
-
-    const video = videoRef.current;
-    if (!video) {
-      return;
-    }
-
-    if (video.paused) {
-      await video.play();
-      setPlayerState("playing");
-    } else {
-      video.pause();
-      setPlayerState("paused");
-    }
-  }
-
-  async function seekPlayback(seconds: number) {
-    const nextSeconds = Math.max(0, hasKnownPlayerLength ? Math.min(seconds, playerLength) : seconds);
-
-    if (isNativePlayback) {
-      await seekNativePlayer(nextSeconds);
-    } else if (videoRef.current) {
-      videoRef.current.currentTime = nextSeconds;
-    }
-
-    setPlayerTime(nextSeconds);
-  }
-
-  async function commitSeekControl(seconds: number) {
-    if (!streamUrl) {
-      setPendingSeekTime(null);
-      return;
-    }
-
-    const nextSeconds = Math.max(0, hasKnownPlayerLength ? Math.min(seconds, playerLength) : seconds);
-    setPendingSeekTime(nextSeconds);
-
-    try {
-      await seekPlayback(nextSeconds);
-    } finally {
-      setPendingSeekTime(null);
-    }
-  }
-
-  async function changePlayerVolume(value: number) {
-    const nextVolume = Math.max(0, Math.min(100, value));
-    setPlayerVolume(nextVolume);
-
-    if (isNativePlayback) {
-      await setNativePlayerVolume(nextVolume);
-    } else if (videoRef.current) {
-      videoRef.current.volume = nextVolume / 100;
-    }
-  }
-
-  async function togglePlayerMuted() {
-    const nextMuted = !isPlayerMuted;
-    setIsPlayerMuted(nextMuted);
-
-    if (isNativePlayback) {
-      await setNativePlayerMuted(nextMuted);
-    } else if (videoRef.current) {
-      videoRef.current.muted = nextMuted;
-    }
-  }
-
-  async function changePlayerRate(value: number) {
-    setPlayerRate(value);
-
-    if (isNativePlayback) {
-      await setNativePlayerRate(value);
-    } else if (videoRef.current) {
-      videoRef.current.playbackRate = value;
-    }
-  }
-
-  function requestSurfaceResync() {
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        setSurfaceSyncNonce((currentNonce) => currentNonce + 1);
-      });
-    });
-  }
-
-  async function togglePlayerFullscreen() {
-    const panel = playerPanelRef.current;
-
-    if (!panel) {
-      return;
-    }
-
-    if (isNativePlayback) {
-      if (document.fullscreenElement === panel) {
-        await document.exitFullscreen();
-        await setNativePlayerFullscreen(false);
-        isPlayerFullscreenRef.current = false;
-        setIsPlayerFullscreen(false);
-        requestSurfaceResync();
-        return;
-      }
-
-      await panel.requestFullscreen();
-      isPlayerFullscreenRef.current = true;
-      setIsPlayerFullscreen(true);
-      requestSurfaceResync();
-      return;
-    }
-
-    if (document.fullscreenElement === panel) {
-      await document.exitFullscreen();
-      setIsPlayerFullscreen(false);
-      requestSurfaceResync();
-      return;
-    }
-
-    await panel.requestFullscreen();
-    setIsPlayerFullscreen(true);
-    requestSurfaceResync();
-  }
-
-  async function chooseAudioTrack(trackId: number) {
-    setSelectedAudioTrackId(trackId);
-    await selectNativeAudioTrack(trackId);
-  }
-
-  async function chooseSubtitleTrack(trackId: number) {
-    setSelectedSubtitleTrackId(trackId);
-    await selectNativeSubtitleTrack(trackId);
   }
 
   async function pullMetadata(sourceOverride?: string) {
@@ -2033,15 +1712,7 @@ function App() {
         throw new DOMException("Stopped current torrent load.", "AbortError");
       }
 
-      const capabilities = await initializeNativePlayer();
-      setNativeCapabilities(capabilities);
-      const shouldUseNativePlayback = capabilities.available;
-      if (!capabilities.available) {
-        setVideoError(capabilities.reason ?? "Native mpv is unavailable, using HTML playback.");
-      }
-      const directStreamUrl = getStreamUrl(activeEngineBaseUrl, torrentId, fileToPlay.index);
-      const fallbackStreamUrl = getVideoStreamSrc(activeEngineBaseUrl, torrentId, fileToPlay.index);
-      const nextUrl = shouldUseNativePlayback ? directStreamUrl : fallbackStreamUrl;
+      const nextUrl = getVideoStreamSrc(activeEngineBaseUrl, torrentId, fileToPlay.index);
 
       setSession({
         ...activeSession,
@@ -2055,37 +1726,7 @@ function App() {
       setPlayerTime(0);
       setPlayerDuration(0);
 
-      if (shouldUseNativePlayback) {
-        setPlaybackBackend("native");
-
-        try {
-          await loadNativePlayer(torrentId, fileToPlay.index, getFileName(fileToPlay), playerTime);
-          await setNativePlayerVolume(playerVolume);
-          await setNativePlayerMuted(isPlayerMuted);
-          await setNativePlayerRate(playerRate);
-          setPlayerState("playing");
-          return;
-        } catch (nativeError) {
-          setPlaybackBackend("html");
-          setStreamUrl(fallbackStreamUrl);
-          setVideoError(`Native player could not start, using HTML fallback: ${getErrorMessage(nativeError)}`);
-        }
-      } else {
-        setPlaybackBackend("html");
-      }
-
-      window.setTimeout(() => {
-        void videoRef.current?.play().catch((error: unknown) => {
-          if (
-            error instanceof DOMException &&
-            (error.name === "NotAllowedError" || error.name === "NotSupportedError" || error.name === "AbortError")
-          ) {
-            return;
-          }
-
-          setVideoError(getErrorMessage(error));
-        });
-      }, 0);
+      // The Video.js lifecycle effect owns autoplay once the host is rendered.
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
         if (controller && shouldShowStoppedLoadRequest(controller)) {
@@ -2107,7 +1748,7 @@ function App() {
   }
 
   return (
-    <main className={`player-app view-${viewMode}${isNativePlayback && streamUrl ? " native-playback-active" : ""}`}>
+    <main className={`player-app view-${viewMode}`}>
       <header className="topbar compact-topbar">
         <div>
           <p className="eyebrow">TorrentDock v1</p>
@@ -2364,68 +2005,22 @@ function App() {
         <div className="player-main">
         <section
           ref={playerPanelRef}
-          className={isNativePlayback && streamUrl ? "player-panel native-player-panel" : "player-panel"}
+          className="player-panel"
           aria-label="Video player"
         >
           <div
-            ref={videoSurfaceRef}
             className={[
               "video-surface",
-              streamUrl ? "video-surface-active" : "",
-              isNativePlayback && streamUrl ? "native-video-surface" : ""
+              streamUrl ? "video-surface-active" : ""
             ].filter(Boolean).join(" ")}
           >
-            {streamUrl && isNativePlayback ? (
-              <div className="native-video-window" aria-label="Native video surface">
-                {isPlayerBuffering ? (
-                  <div className="video-center native-video-overlay">
-                    <Loader2 className="spin" size={36} aria-hidden="true" />
-                    <div>
-                      <h2>Buffering from torrent pieces</h2>
-                      <p>mpv is waiting for rqbit to make the next range available.</p>
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            ) : streamUrl ? (
-              <video
-                ref={videoRef}
-                src={streamUrl}
-                controls
-                playsInline
-                style={subtitleStyle}
-                onPlay={() => {
-                  setVideoError(null);
-                  setPlayerState("playing");
-                }}
-                onPause={() => {
-                  setPlayerState("paused");
-                }}
-                onLoadedMetadata={syncHtmlPlaybackState}
-                onTimeUpdate={syncHtmlPlaybackState}
-                onDurationChange={syncHtmlPlaybackState}
-                onVolumeChange={(event) => {
-                  setPlayerVolume(Math.round(event.currentTarget.volume * 100));
-                  setIsPlayerMuted(event.currentTarget.muted);
-                }}
-                onError={(event) => {
-                  setVideoError(describeMediaError(event.currentTarget.error, selectedFile ? getFileName(selectedFile) : session?.name ?? ""));
-                  setStreamUrl(null);
-                  setMetadataState("ready");
-                }}
-              >
-                {subtitleTrackUrl ? (
-                  <track
-                    key={subtitleTrackUrl}
-                    kind="subtitles"
-                    src={subtitleTrackUrl}
-                    srcLang="en"
-                    label={subtitleFileName ?? "Custom subtitles"}
-                    default
-                    onLoad={(event) => showSubtitleTrack(event.currentTarget.track)}
-                  />
-                ) : null}
-              </video>
+            {streamUrl ? (
+              <div
+                key={streamUrl}
+                ref={videoJsHostRef}
+                className="torrentdock-video-js-host"
+                aria-label="Chromium FFmpeg video player"
+              />
             ) : (
               <div className="video-center">
                 {metadataState === "fetching" || metadataState === "starting" ? (
@@ -2445,159 +2040,6 @@ function App() {
                 <p>{videoError}</p>
               </div>
             ) : null}
-          </div>
-
-          <div
-            ref={playerToolbarRef}
-            className={`player-toolbar${isPlayerFullscreen && !playerControlsVisible ? " player-toolbar-hidden" : ""}`}
-            aria-label="Playback controls"
-            onPointerMove={() => setPlayerControlsVisible(true)}
-            onFocus={() => setPlayerControlsVisible(true)}
-          >
-            <button
-              type="button"
-              className="ghost-button transport-toggle"
-              disabled={!streamUrl}
-              onClick={() => {
-                void toggleTransportPlayback().catch((error: unknown) => setVideoError(getErrorMessage(error)));
-              }}
-            >
-              {playerState === "playing" ? <CirclePause size={18} aria-hidden="true" /> : <Play size={18} aria-hidden="true" />}
-              {playerState === "playing" ? "Pause" : "Resume"}
-            </button>
-
-            <div className="volume-menu">
-              <button
-                type="button"
-                className="ghost-button icon-control"
-                aria-label={isPlayerMuted ? "Unmute" : "Mute"}
-                disabled={!streamUrl}
-                onClick={() => {
-                  void togglePlayerMuted().catch((error: unknown) => setVideoError(getErrorMessage(error)));
-                }}
-              >
-                {isPlayerMuted ? <VolumeX size={18} aria-hidden="true" /> : <Volume2 size={18} aria-hidden="true" />}
-              </button>
-              <div className="volume-popover" role="group" aria-label="Volume">
-                <span>Volume</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={1}
-                  value={playerVolume}
-                  disabled={!streamUrl}
-                  aria-label="Volume"
-                  onChange={(event) => {
-                    void changePlayerVolume(Number(event.target.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
-                  }}
-                />
-                <strong>{playerVolume}%</strong>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              className="ghost-button icon-control"
-              aria-label={isPlayerFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-              disabled={!streamUrl}
-              onClick={() => {
-                void togglePlayerFullscreen().catch((error: unknown) => setVideoError(getErrorMessage(error)));
-              }}
-            >
-              {isPlayerFullscreen ? <Minimize2 size={18} aria-hidden="true" /> : <Maximize2 size={18} aria-hidden="true" />}
-            </button>
-
-            <label className="seek-control toolbar-seek-control">
-              <span>
-                {formatPlaybackTime(displayedPlayerPosition)} / {hasKnownPlayerLength ? formatPlaybackTime(playerLength) : "--:--"}
-              </span>
-              <input
-                type="range"
-                min={0}
-                max={playerSeekMax}
-                step={1}
-                value={Math.min(Math.round(displayedPlayerPosition), playerSeekMax)}
-                disabled={!streamUrl}
-                onChange={(event) => {
-                  setPendingSeekTime(Number(event.target.value));
-                }}
-                onPointerUp={(event) => {
-                  void commitSeekControl(Number(event.currentTarget.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
-                }}
-                onMouseUp={(event) => {
-                  void commitSeekControl(Number(event.currentTarget.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
-                }}
-                onTouchEnd={(event) => {
-                  void commitSeekControl(Number(event.currentTarget.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
-                }}
-                onKeyUp={(event) => {
-                  if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) {
-                    void commitSeekControl(Number(event.currentTarget.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
-                  }
-                }}
-                onBlur={(event) => {
-                  if (pendingSeekTime !== null) {
-                    void commitSeekControl(Number(event.currentTarget.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
-                  }
-                }}
-              />
-            </label>
-
-            <label className="toolbar-inline-control toolbar-rate-control">
-              <span>Speed</span>
-              <select
-                value={playerRate}
-                disabled={!streamUrl}
-                onChange={(event) => {
-                  void changePlayerRate(Number(event.target.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
-                }}
-              >
-                {playbackRates.map((rate) => (
-                  <option key={rate} value={rate}>
-                    {rate}x
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            {isNativePlayback && audioTracks.length > 0 ? (
-              <label className="toolbar-inline-control toolbar-track-control">
-                <span>Audio</span>
-                <select
-                  value={selectedAudioTrackId ?? ""}
-                  onChange={(event) => {
-                    void chooseAudioTrack(Number(event.target.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
-                  }}
-                >
-                  {audioTracks.map((track) => (
-                    <option key={track.id} value={track.id}>
-                      {track.title}{track.language ? ` (${track.language})` : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : null}
-
-            {isNativePlayback && embeddedSubtitleTracks.length > 0 ? (
-              <label className="toolbar-inline-control toolbar-track-control">
-                <span>Subtitles</span>
-                <select
-                  value={selectedSubtitleTrackId ?? -1}
-                  onChange={(event) => {
-                    void chooseSubtitleTrack(Number(event.target.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
-                  }}
-                >
-                  <option value={-1}>Off</option>
-                  {embeddedSubtitleTracks.map((track) => (
-                    <option key={track.id} value={track.id}>
-                      {track.title}{track.language ? ` (${track.language})` : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : null}
-
           </div>
         </section>
 
@@ -2635,14 +2077,6 @@ function App() {
               </label>
             </div>
 
-            <div className="subtitle-state">
-              <Captions size={18} aria-hidden="true" />
-              <div>
-                <strong>{subtitleFileName ?? "No subtitle loaded"}</strong>
-                <span>{subtitleFileName ? `${formatSubtitleOffset(subtitleOffsetSeconds)} shift - ${subtitleSizePercent}% size` : "Add an .srt or .vtt file."}</span>
-              </div>
-            </div>
-
             {subtitleError ? <p className="subtitle-error">{subtitleError}</p> : null}
 
             <form
@@ -2652,172 +2086,202 @@ function App() {
                 void findOnlineSubtitles();
               }}
             >
-              <div className="online-subtitle-actions">
-                <label className="online-provider-select">
-                  Provider
-                  <select
-                    value={onlineSubtitleProvider}
-                    onChange={(event) => setOnlineSubtitleProvider(event.target.value as OnlineSubtitleProvider)}
-                  >
-                    <option value="subsource">SubSource</option>
-                    <option value="opensubtitles">OpenSubtitles.org</option>
-                  </select>
-                </label>
+              <div className="online-provider-header">
+                <button
+                  type="button"
+                  className="online-provider-toggle"
+                  aria-expanded={isSubtitleProviderExpanded}
+                  aria-label={isSubtitleProviderExpanded ? "Hide provider settings" : "Show provider settings"}
+                  onClick={() => setIsSubtitleProviderExpanded((expanded) => !expanded)}
+                >
+                  {isSubtitleProviderExpanded ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
+                </button>
                 <button
                   type="submit"
                   className="ghost-button online-subtitle-search-button"
+                  aria-label={onlineSubtitleSearchState === "searching" ? "Finding online subtitles" : "Find online subtitles"}
                   disabled={onlineSubtitleSearchState === "searching" || onlineSubtitleSearchState === "loading" || !session}
                 >
                   {onlineSubtitleSearchState === "searching" ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Search size={16} aria-hidden="true" />}
-                  {onlineSubtitleSearchState === "searching" ? "Finding" : "Find online"}
                 </button>
               </div>
 
-              <div className={`online-subtitle-fields ${onlineSubtitleProvider}-fields`}>
-                {onlineSubtitleProvider === "subsource" ? (
-                  <>
-                    <label>
-                      SubSource API key
-                      <input
-                        type="password"
-                        value={subSourceApiKey}
-                        onChange={(event) => setSubSourceApiKey(event.target.value)}
-                        autoComplete="off"
-                        spellCheck={false}
-                      />
-                    </label>
-                    <label>
-                      Lang
+              {isSubtitleProviderExpanded ? (
+                <>
+                  <div className="online-subtitle-actions">
+                    <label className="online-provider-select">
+                      Provider
                       <select
-                        value={subSourceLanguage}
-                        onChange={(event) => setSubSourceLanguage(event.target.value)}
+                        value={onlineSubtitleProvider}
+                        onChange={(event) => setOnlineSubtitleProvider(event.target.value as OnlineSubtitleProvider)}
                       >
-                        {subSourceLanguageOptions.map((language) => (
-                          <option key={language.value} value={language.value}>
-                            {language.label}
-                          </option>
-                        ))}
+                        <option value="subsource">SubSource</option>
+                        <option value="opensubtitles">OpenSubtitles.org</option>
                       </select>
                     </label>
-                  </>
-                ) : (
-                  <>
-                    <label>
-                      OpenSubtitles.org username
-                      <input
-                        type="text"
-                        value={openSubtitlesUsername}
-                        onChange={(event) => setOpenSubtitlesUsername(event.target.value)}
-                        autoComplete="username"
-                        spellCheck={false}
-                      />
-                    </label>
-                    <label>
-                      Password
-                      <input
-                        type="password"
-                        value={openSubtitlesPassword}
-                        onChange={(event) => setOpenSubtitlesPassword(event.target.value)}
-                        autoComplete="current-password"
-                        spellCheck={false}
-                      />
-                    </label>
-                    <label>
-                      Lang
-                      <select
-                        value={openSubtitlesLanguage}
-                        onChange={(event) => setOpenSubtitlesLanguage(event.target.value)}
-                      >
-                        {openSubtitlesLanguageOptions.map((language) => (
-                          <option key={language.value} value={language.value}>
-                            {language.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </>
-                )}
-              </div>
-            </form>
+                  </div>
 
-            <p className="online-subtitle-help">
-              Need access? Create a free{" "}
-              <a href="https://subsource.net/dashboard/profile" target="_blank" rel="noreferrer">
-                SubSource API key
-              </a>
-              , an{" "}
-              <a href="https://www.opensubtitles.org/en/newuser" target="_blank" rel="noreferrer">
-                OpenSubtitles.org account
-              </a>
-              , then paste the details requested above.
-            </p>
-            {onlineSubtitleProvider === "opensubtitles" ? (
-              <p className="online-subtitle-help">
-                This uses the legacy Popcorn Time XML-RPC flow. Free OpenSubtitles.org accounts can search, but the old .org API now replaces downloads with a VIP notice; free app downloads require the newer OpenSubtitles.com REST API.
-              </p>
-            ) : null}
+                  <div className={`online-subtitle-fields ${onlineSubtitleProvider}-fields`}>
+                    {onlineSubtitleProvider === "subsource" ? (
+                      <>
+                        <label>
+                          SubSource API key
+                          <input
+                            type="password"
+                            value={subSourceApiKey}
+                            onChange={(event) => setSubSourceApiKey(event.target.value)}
+                            autoComplete="off"
+                            spellCheck={false}
+                          />
+                        </label>
+                        <label>
+                          Lang
+                          <select
+                            value={subSourceLanguage}
+                            onChange={(event) => setSubSourceLanguage(event.target.value)}
+                          >
+                            {subSourceLanguageOptions.map((language) => (
+                              <option key={language.value} value={language.value}>
+                                {language.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </>
+                    ) : (
+                      <>
+                        <label>
+                          OpenSubtitles.org username
+                          <input
+                            type="text"
+                            value={openSubtitlesUsername}
+                            onChange={(event) => setOpenSubtitlesUsername(event.target.value)}
+                            autoComplete="username"
+                            spellCheck={false}
+                          />
+                        </label>
+                        <label>
+                          Password
+                          <input
+                            type="password"
+                            value={openSubtitlesPassword}
+                            onChange={(event) => setOpenSubtitlesPassword(event.target.value)}
+                            autoComplete="current-password"
+                            spellCheck={false}
+                          />
+                        </label>
+                        <label>
+                          Lang
+                          <select
+                            value={openSubtitlesLanguage}
+                            onChange={(event) => setOpenSubtitlesLanguage(event.target.value)}
+                          >
+                            {openSubtitlesLanguageOptions.map((language) => (
+                              <option key={language.value} value={language.value}>
+                                {language.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </>
+                    )}
+                  </div>
+
+                  <p className="online-subtitle-help">
+                    Need access? Create a free{" "}
+                    <a href="https://subsource.net/dashboard/profile" target="_blank" rel="noreferrer">
+                      SubSource API key
+                    </a>
+                    , an{" "}
+                    <a href="https://www.opensubtitles.org/en/newuser" target="_blank" rel="noreferrer">
+                      OpenSubtitles.org account
+                    </a>
+                    , then paste the details requested above.
+                  </p>
+                </>
+              ) : null}
+            </form>
 
             {onlineSubtitleError ? <p className="subtitle-error">{onlineSubtitleError}</p> : null}
 
-            {onlineSubtitleResults.length > 0 ? (
-              <div className="online-subtitle-results" aria-label="Online subtitle results">
-                {onlineSubtitleResults.map((result) => {
-                  const isLoadingOnlineResult = onlineSubtitleLoadingResultId === result.id;
-                  const isActiveOnlineResult = activeOnlineResultId === result.id;
-                  const resultMeta = [
-                    getOnlineSubtitleProviderLabel(result.provider),
-                    result.language,
-                    result.format.toUpperCase(),
-                    result.isRawFile ? null : "ZIP",
-                    result.size ? formatBytes(result.size) : null,
-                    result.hi ? "HI" : null,
-                    result.fps ? `${result.fps} fps` : null
-                  ].filter(Boolean);
+            {subtitleListCount > 0 ? (
+              <div className="subtitle-list-section">
+                <button
+                  type="button"
+                  className="subtitle-list-toggle"
+                  aria-expanded={isSubtitleListExpanded}
+                  onClick={() => setIsSubtitleListExpanded((expanded) => !expanded)}
+                >
+                  {isSubtitleListExpanded ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
+                  <span>Subtitle list</span>
+                  <small>{subtitleListCount} item{subtitleListCount === 1 ? "" : "s"}</small>
+                </button>
 
-                  return (
-                    <button
-                      type="button"
-                      className={isActiveOnlineResult ? "online-subtitle-result active" : "online-subtitle-result"}
-                      key={result.id}
-                      onClick={() => {
-                        void loadOnlineSubtitle(result);
-                      }}
-                      disabled={onlineSubtitleSearchState === "loading" || isLoadingOnlineResult}
-                    >
-                      {isLoadingOnlineResult ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Download size={16} aria-hidden="true" />}
-                      <span>
-                        <strong>{result.releaseName}</strong>
-                        <small>{resultMeta.join(" - ")}</small>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : null}
+                {isSubtitleListExpanded ? (
+                  <div className="subtitle-list-body">
+                    {onlineSubtitleResults.length > 0 ? (
+                      <div className="online-subtitle-results" aria-label="Online subtitle results">
+                        {onlineSubtitleResults.map((result) => {
+                          const isLoadingOnlineResult = onlineSubtitleLoadingResultId === result.id;
+                          const isActiveOnlineResult = activeOnlineResultId === result.id;
+                          const resultMeta = [
+                            getOnlineSubtitleProviderLabel(result.provider),
+                            result.language,
+                            result.format.toUpperCase(),
+                            result.isRawFile ? null : "ZIP",
+                            result.size ? formatBytes(result.size) : null,
+                            result.hi ? "HI" : null,
+                            result.fps ? `${result.fps} fps` : null
+                          ].filter(Boolean);
 
-            {subtitleFiles.length > 0 ? (
-              <div className="subtitle-source-list" aria-label="Subtitle files in this torrent">
-                {subtitleFiles.map((file) => {
-                  const fileName = getFileName(file);
-                  const isLoadingSubtitle = subtitleLoadingFileIndex === file.index;
-                  const isActiveSubtitle = subtitleFileName === fileName;
+                          return (
+                            <button
+                              type="button"
+                              className={isActiveOnlineResult ? "online-subtitle-result active" : "online-subtitle-result"}
+                              key={result.id}
+                              onClick={() => {
+                                void loadOnlineSubtitle(result);
+                              }}
+                              disabled={onlineSubtitleSearchState === "loading" || isLoadingOnlineResult}
+                            >
+                              {isLoadingOnlineResult ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Download size={16} aria-hidden="true" />}
+                              <span>
+                                <strong>{result.releaseName}</strong>
+                                <small>{resultMeta.join(" - ")}</small>
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
 
-                  return (
-                    <button
-                      type="button"
-                      className={isActiveSubtitle ? "subtitle-source active" : "subtitle-source"}
-                      key={`${file.index}-${file.name}`}
-                      onClick={() => {
-                        void loadSubtitleFromTorrent(file);
-                      }}
-                      disabled={isTorrentLoading || isLoadingSubtitle}
-                    >
-                      {isLoadingSubtitle ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Captions size={16} aria-hidden="true" />}
-                      <span>{fileName}</span>
-                      <small>{formatBytes(file.length)}</small>
-                    </button>
-                  );
-                })}
+                    {subtitleFiles.length > 0 ? (
+                      <div className="subtitle-source-list" aria-label="Subtitle files in this torrent">
+                        {subtitleFiles.map((file) => {
+                          const fileName = getFileName(file);
+                          const isLoadingSubtitle = subtitleLoadingFileIndex === file.index;
+                          const isActiveSubtitle = subtitleFileName === fileName;
+
+                          return (
+                            <button
+                              type="button"
+                              className={isActiveSubtitle ? "subtitle-source active" : "subtitle-source"}
+                              key={`${file.index}-${file.name}`}
+                              onClick={() => {
+                                void loadSubtitleFromTorrent(file);
+                              }}
+                              disabled={isTorrentLoading || isLoadingSubtitle}
+                            >
+                              {isLoadingSubtitle ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Captions size={16} aria-hidden="true" />}
+                              <span>{fileName}</span>
+                              <small>{formatBytes(file.length)}</small>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             ) : null}
 
@@ -2826,48 +2290,18 @@ function App() {
                 <StepBack size={16} aria-hidden="true" />
                 Earlier
               </button>
-              <button type="button" className="ghost-button" onClick={resetSubtitleShift} disabled={!subtitleRawText || subtitleOffsetSeconds === 0}>
-                0s
+              <button
+                type="button"
+                className="ghost-button subtitle-shift-value"
+                onClick={resetSubtitleShift}
+                disabled={!subtitleRawText || subtitleOffsetSeconds === 0}
+                aria-label="Reset subtitle timing shift"
+              >
+                {formatSubtitleOffset(subtitleOffsetSeconds)}
               </button>
               <button type="button" className="ghost-button" onClick={() => shiftSubtitle(subtitleShiftStepSeconds)} disabled={!subtitleRawText}>
                 <StepForward size={16} aria-hidden="true" />
                 Later
-              </button>
-            </div>
-
-            <div className="subtitle-size-row">
-              <button
-                type="button"
-                className="ghost-button"
-                aria-label="Decrease subtitle size"
-                onClick={() => setSubtitleSizePercent((currentSize) => Math.max(minSubtitleSizePercent, currentSize - 5))}
-                disabled={!subtitleRawText || subtitleSizePercent <= minSubtitleSizePercent}
-              >
-                <Minus size={16} aria-hidden="true" />
-              </button>
-              <label>
-                <span className="subtitle-size-label">
-                  <span>Size</span>
-                  <output>{subtitleSizePercent}%</output>
-                </span>
-                <input
-                  type="range"
-                  min={minSubtitleSizePercent}
-                  max={maxSubtitleSizePercent}
-                  step={5}
-                  value={subtitleSizePercent}
-                  onChange={(event) => setSubtitleSizePercent(Number(event.target.value))}
-                  disabled={!subtitleRawText}
-                />
-              </label>
-              <button
-                type="button"
-                className="ghost-button"
-                aria-label="Increase subtitle size"
-                onClick={() => setSubtitleSizePercent((currentSize) => Math.min(maxSubtitleSizePercent, currentSize + 5))}
-                disabled={!subtitleRawText || subtitleSizePercent >= maxSubtitleSizePercent}
-              >
-                <Plus size={16} aria-hidden="true" />
               </button>
             </div>
 
