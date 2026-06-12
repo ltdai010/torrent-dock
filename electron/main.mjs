@@ -49,7 +49,7 @@ function sleep(ms) {
 function resolveRqbitBinary() {
   const platformCandidates = {
     win32: ["rqbit-x86_64-pc-windows-msvc.exe", "rqbit-x86_64-pc-windows-gnu.exe"],
-    darwin: ["rqbit-aarch64-apple-darwin", "rqbit-x86_64-apple-darwin", "rqbit"],
+    darwin: ["rqbit-universal-apple-darwin", "rqbit-aarch64-apple-darwin", "rqbit-x86_64-apple-darwin", "rqbit"],
     linux: ["rqbit-x86_64-unknown-linux-gnu", "rqbit"]
   };
   const names = platformCandidates[process.platform] ?? ["rqbit"];
