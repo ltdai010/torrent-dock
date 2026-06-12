@@ -19,7 +19,11 @@ fn log_line(message: &str) {
         );
     }
     for path in targets {
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             let _ = writeln!(file, "{message}");
         }
     }
@@ -229,6 +233,9 @@ mod tests {
 
     #[test]
     fn parses_range_start() {
-        assert_eq!(parse_range_start(Some("bytes=1991344128-")), Some(1991344128));
+        assert_eq!(
+            parse_range_start(Some("bytes=1991344128-")),
+            Some(1991344128)
+        );
     }
 }

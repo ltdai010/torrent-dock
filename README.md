@@ -50,6 +50,42 @@ Run the full check suite locally when Node and Rust are installed:
 npm run check:all
 ```
 
+## macOS source builds
+
+macOS builds must be produced on macOS with the Tauri desktop prerequisites installed. From a Mac:
+
+```bash
+npm install
+make mac-check
+make mac-dev
+make mac-build
+```
+
+`make mac-build` prepares the rqbit sidecar for the current Mac Rust target triple, verifies the optional mpv runtime manifest, and runs the Tauri build for that target.
+
+For a universal macOS app bundle:
+
+```bash
+make mac-build-universal
+```
+
+To choose a specific target explicitly:
+
+```bash
+make mac-build MAC_TARGET=aarch64-apple-darwin
+make mac-build MAC_TARGET=x86_64-apple-darwin
+```
+
+The equivalent npm commands are:
+
+```bash
+npm run mac:check
+npm run mac:dev
+npm run mac:build
+```
+
+Native libmpv is loaded dynamically. If `src-tauri/mpv/libmpv.2.dylib` is not present, the app can still launch and use the non-native fallback path; install or bundle a pinned LGPL-compatible libmpv runtime before validating native playback on macOS.
+
 Run the same checks in Docker:
 
 ```bash

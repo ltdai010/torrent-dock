@@ -22,3 +22,11 @@ futures-util = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 scraper = "0.24"
 url = "2"
+libloading = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_WindowsAndMessaging"
+] }

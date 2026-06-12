@@ -26,7 +26,10 @@ fn subsource_client() -> Result<reqwest::Client, String> {
 /// preflight that the site does not allow. Running it here avoids CORS, the
 /// same approach already used for torrent sources and OpenSubtitles.
 #[tauri::command]
-pub async fn subsource_api_get(path: String, api_key: String) -> Result<SubSourceApiResponse, String> {
+pub async fn subsource_api_get(
+    path: String,
+    api_key: String,
+) -> Result<SubSourceApiResponse, String> {
     if !path.starts_with("/api/") {
         return Err("invalid SubSource API path".to_string());
     }

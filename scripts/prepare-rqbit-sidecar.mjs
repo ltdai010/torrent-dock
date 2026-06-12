@@ -10,10 +10,21 @@ const releaseApiUrl = "https://api.github.com/repos/ikatson/rqbit/releases/lates
 const assetByTarget = {
   "aarch64-apple-darwin": "rqbit-osx-universal",
   "aarch64-unknown-linux-gnu": "rqbit-linux-arm64",
+  "universal-apple-darwin": "rqbit-osx-universal",
   "x86_64-apple-darwin": "rqbit-osx-universal",
   "x86_64-pc-windows-msvc": "rqbit.exe",
   "x86_64-unknown-linux-gnu": "rqbit-linux-amd64"
 };
+
+function getRequestedTargetTriple() {
+  const targetIndex = process.argv.indexOf("--target");
+  if (targetIndex !== -1) {
+    return process.argv[targetIndex + 1];
+  }
+
+  const targetArg = process.argv.find((arg) => arg.startsWith("--target="));
+  return targetArg?.slice("--target=".length);
+}
 
 function getHostTargetTriple() {
   try {
@@ -39,7 +50,7 @@ async function download(url, destination) {
   await writeFile(destination, Buffer.from(await response.arrayBuffer()));
 }
 
-const targetTriple = getHostTargetTriple();
+const targetTriple = getRequestedTargetTriple() || getHostTargetTriple();
 const assetName = assetByTarget[targetTriple];
 
 if (!targetTriple || !assetName) {

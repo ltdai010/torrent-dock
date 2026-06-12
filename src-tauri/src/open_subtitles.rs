@@ -2,8 +2,11 @@ use std::time::Duration;
 
 const OPEN_SUBTITLES_XML_RPC_URL: &str = "https://api.opensubtitles.org/xml-rpc";
 const OPEN_SUBTITLES_USER_AGENT: &str = "Popcorn Time v1";
-const OPEN_SUBTITLES_DOWNLOAD_HOSTS: &[&str] =
-    &["dl.opensubtitles.org", "www.opensubtitles.org", "opensubtitles.org"];
+const OPEN_SUBTITLES_DOWNLOAD_HOSTS: &[&str] = &[
+    "dl.opensubtitles.org",
+    "www.opensubtitles.org",
+    "opensubtitles.org",
+];
 
 #[tauri::command]
 pub async fn open_subtitles_org_request(body: String) -> Result<String, String> {
@@ -44,7 +47,9 @@ pub async fn open_subtitles_org_download(url: String) -> Result<Vec<u8>, String>
         .ok_or_else(|| "invalid OpenSubtitles.org download URL: missing host".to_string())?;
 
     if !OPEN_SUBTITLES_DOWNLOAD_HOSTS.contains(&host) {
-        return Err(format!("refusing unexpected OpenSubtitles.org download host: {host}"));
+        return Err(format!(
+            "refusing unexpected OpenSubtitles.org download host: {host}"
+        ));
     }
 
     let client = reqwest::Client::builder()
@@ -64,7 +69,9 @@ pub async fn open_subtitles_org_download(url: String) -> Result<Vec<u8>, String>
         .map_err(|error| format!("OpenSubtitles.org direct download could not be read: {error}"))?;
 
     if !status.is_success() {
-        return Err(format!("OpenSubtitles.org direct download returned HTTP {status}"));
+        return Err(format!(
+            "OpenSubtitles.org direct download returned HTTP {status}"
+        ));
     }
 
     Ok(bytes.to_vec())
