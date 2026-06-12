@@ -127,6 +127,7 @@ const subSourceLanguageStorageKey = "torrentdock.subSourceLanguage";
 const openSubtitlesUsernameStorageKey = "torrentdock.openSubtitlesOrgUsername";
 const openSubtitlesPasswordStorageKey = "torrentdock.openSubtitlesOrgPassword";
 const openSubtitlesLanguageStorageKey = "torrentdock.openSubtitlesLanguage";
+const historyRequestTimeoutMs = 5000;
 const onlineSubtitleLanguageOptions = [
   { value: "EN", label: "English" },
   { value: "VI", label: "Vietnamese" },
@@ -491,6 +492,7 @@ function App() {
   const playerToolbarRef = useRef<HTMLDivElement | null>(null);
   const activeLoadAbortRef = useRef<AbortController | null>(null);
   const activeTorrentIdRef = useRef<number | null>(null);
+  const sourceSearchRequestRef = useRef(0);
   const stoppedLoadControllersRef = useRef<WeakSet<AbortController>>(new WeakSet());
   const isNativePlaybackRef = useRef(false);
   const isPlayerFullscreenRef = useRef(false);
@@ -556,12 +558,17 @@ function App() {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyBusyId, setHistoryBusyId] = useState<number | null>(null);
   const [isClearingHistory, setIsClearingHistory] = useState(false);
+  const hasLoadedHistoryRef = useRef(false);
+  const suppressHistoryClickRef = useRef(false);
+  const suppressNewSearchClickRef = useRef(false);
 
   const playableFiles = useMemo(() => session?.files.filter(isPlayable) ?? [], [session]);
   const subtitleFiles = useMemo(() => session?.files.filter(isSubtitleFile) ?? [], [session]);
   const selectedFile = playableFiles[selectedFileIndex] ?? playableFiles[0];
   const isNativeAvailable = nativeCapabilities.available;
   const isNativePlayback = playbackBackend === "native" && isNativeAvailable;
+  const isEmbeddedNativePlayback = isNativePlayback && nativeCapabilities.supportsNativeSurface;
+  const isExternalNativePlayback = isNativePlayback && !nativeCapabilities.supportsNativeSurface;
   const audioTracks = useMemo(() => playerTracks.filter((track) => track.kind === "audio"), [playerTracks]);
   const embeddedSubtitleTracks = useMemo(() => playerTracks.filter((track) => track.kind === "subtitle"), [playerTracks]);
   const isTorrentLoading = metadataState === "fetching" || metadataState === "starting";
@@ -611,8 +618,12 @@ function App() {
 
     void listenNativePlayerEvents({
       onState: (state) => {
-        if (state === "playing" || state === "paused") {
+        if (state === "playing" || state === "paused" || state === "stopped") {
           setPlayerState(state);
+        }
+        if (state === "stopped") {
+          setIsPlayerBuffering(false);
+          setMetadataState((currentState) => (currentState === "streaming" ? "ready" : currentState));
         }
       },
       onTime: (value) => {
@@ -1028,6 +1039,9 @@ function App() {
 
   async function searchSources(queryOverride?: string) {
     const normalizedQuery = (queryOverride ?? sourceQuery).trim();
+    const requestId = sourceSearchRequestRef.current + 1;
+    sourceSearchRequestRef.current = requestId;
+    const isCurrentSourceSearch = () => sourceSearchRequestRef.current === requestId;
 
     setSourceErrorMessage(null);
     setSourceErrors([]);
@@ -1044,6 +1058,10 @@ function App() {
       setSourceResults([]);
       const response = await searchTorrentSources(normalizedQuery, {
         onProviderSettled: (progress) => {
+          if (!isCurrentSourceSearch()) {
+            return;
+          }
+
           if (progress.results.length > 0) {
             setSourceResults((currentResults) => dedupeProviderResults([...currentResults, ...progress.results], normalizedQuery));
           }
@@ -1053,6 +1071,10 @@ function App() {
           }
         }
       });
+
+      if (!isCurrentSourceSearch()) {
+        return;
+      }
 
       setSourceResults(response.results);
       setSourceErrors(response.errors);
@@ -1066,6 +1088,10 @@ function App() {
         );
       }
     } catch (error) {
+      if (!isCurrentSourceSearch()) {
+        return;
+      }
+
       setSourceResults([]);
       setSourceSearchState("error");
       setSourceErrorMessage(getErrorMessage(error));
@@ -1181,14 +1207,44 @@ function App() {
     setDownloadProgress(null);
   }
 
-  async function openHistory() {
-    stopActivePlayback();
+  function openHistory() {
+    setHistoryError(null);
+    if (!hasLoadedHistoryRef.current) {
+      setHistoryState("idle");
+    }
     setShowHistory(true);
-    await loadHistory();
+    stopActivePlayback();
+    void loadHistory();
   }
 
   function closeHistory() {
     setShowHistory(false);
+  }
+
+  function toggleHistory() {
+    if (showHistory) {
+      closeHistory();
+    } else {
+      openHistory();
+    }
+  }
+
+  function activateHistoryFromPointer(event: React.PointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0) {
+      return;
+    }
+
+    suppressHistoryClickRef.current = true;
+    toggleHistory();
+  }
+
+  function activateHistoryFromClick() {
+    if (suppressHistoryClickRef.current) {
+      suppressHistoryClickRef.current = false;
+      return;
+    }
+
+    toggleHistory();
   }
 
   async function loadHistory() {
@@ -1198,12 +1254,15 @@ function App() {
     try {
       const activeEngineBaseUrl = engineBaseUrl ?? (await ensureRqbitEngineEndpoint());
       setEngineBaseUrl(activeEngineBaseUrl);
-      const items = await listLibraryTorrents(activeEngineBaseUrl);
+      const items = await listLibraryTorrents(activeEngineBaseUrl, historyRequestTimeoutMs);
       items.sort((a, b) => b.id - a.id);
       setHistoryItems(items);
       setHistoryState("ready");
+      hasLoadedHistoryRef.current = true;
     } catch (error) {
-      setHistoryItems([]);
+      if (!hasLoadedHistoryRef.current) {
+        setHistoryItems([]);
+      }
       setHistoryState("error");
       setHistoryError(getErrorMessage(error));
     }
@@ -1273,9 +1332,14 @@ function App() {
   }
 
   function returnToTitleSearch() {
-    stopActivePlayback();
+    sourceSearchRequestRef.current += 1;
+    activeTorrentIdRef.current = null;
+    setShowHistory(false);
     setSelectedCatalogTitle(null);
     setSelectedSourceResultId(null);
+    setCatalogResults([]);
+    setCatalogErrorMessage(null);
+    setCatalogSearchState("idle");
     setSourceResults([]);
     setSourceErrors([]);
     setSourceErrorMessage(null);
@@ -1285,10 +1349,33 @@ function App() {
     setMetadataState("idle");
     setErrorMessage(null);
     setTorrentInput("");
+    setSourceQuery("");
     removeSubtitleFile();
     setOnlineSubtitleResults([]);
     setOnlineSubtitleError(null);
     setOnlineSubtitleSearchState("idle");
+    stopActivePlayback();
+    window.setTimeout(() => {
+      document.getElementById("source-query")?.focus();
+    }, 0);
+  }
+
+  function activateNewSearchFromPointer(event: React.PointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0) {
+      return;
+    }
+
+    suppressNewSearchClickRef.current = true;
+    returnToTitleSearch();
+  }
+
+  function activateNewSearchFromClick() {
+    if (suppressNewSearchClickRef.current) {
+      suppressNewSearchClickRef.current = false;
+      return;
+    }
+
+    returnToTitleSearch();
   }
 
   function returnToSources() {
@@ -1391,7 +1478,12 @@ function App() {
               Back to torrents
             </button>
           ) : null}
-          <button type="button" className="ghost-button" onClick={returnToTitleSearch}>
+          <button
+            type="button"
+            className="ghost-button"
+            onPointerDown={activateNewSearchFromPointer}
+            onClick={activateNewSearchFromClick}
+          >
             <Search size={16} aria-hidden="true" />
             New search
           </button>
@@ -1440,6 +1532,11 @@ function App() {
           <div className="history-empty">
             <Loader2 className="spin" size={28} aria-hidden="true" />
             <p>Loading torrents from the engine…</p>
+          </div>
+        ) : historyState === "error" && historyItems.length === 0 ? (
+          <div className="history-empty">
+            <History size={28} aria-hidden="true" />
+            <p>History is open, but the engine did not return downloads.</p>
           </div>
         ) : historyItems.length === 0 ? (
           <div className="history-empty">
@@ -2107,7 +2204,7 @@ function App() {
   }
 
   return (
-    <main className={`player-app view-${viewMode}${isNativePlayback && streamUrl ? " native-playback-active" : ""}`}>
+    <main className={`player-app view-${viewMode}${isEmbeddedNativePlayback && streamUrl && !showHistory ? " native-playback-active" : ""}`}>
       <header className="topbar compact-topbar">
         <div>
           <p className="eyebrow">TorrentDock v1</p>
@@ -2115,15 +2212,11 @@ function App() {
         </div>
         <div className="topbar-actions">
           <button
+            key="history"
             type="button"
             className={showHistory ? "ghost-button history-toggle active" : "ghost-button history-toggle"}
-            onClick={() => {
-              if (showHistory) {
-                closeHistory();
-              } else {
-                void openHistory();
-              }
-            }}
+            onPointerDown={activateHistoryFromPointer}
+            onClick={activateHistoryFromClick}
           >
             <History size={16} aria-hidden="true" />
             History
@@ -2364,7 +2457,7 @@ function App() {
         <div className="player-main">
         <section
           ref={playerPanelRef}
-          className={isNativePlayback && streamUrl ? "player-panel native-player-panel" : "player-panel"}
+          className={isEmbeddedNativePlayback && streamUrl ? "player-panel native-player-panel" : "player-panel"}
           aria-label="Video player"
         >
           <div
@@ -2372,12 +2465,20 @@ function App() {
             className={[
               "video-surface",
               streamUrl ? "video-surface-active" : "",
-              isNativePlayback && streamUrl ? "native-video-surface" : ""
+              isEmbeddedNativePlayback && streamUrl ? "native-video-surface" : ""
             ].filter(Boolean).join(" ")}
           >
             {streamUrl && isNativePlayback ? (
               <div className="native-video-window" aria-label="Native video surface">
-                {isPlayerBuffering ? (
+                {isExternalNativePlayback ? (
+                  <div className="video-center native-video-overlay">
+                    <Clapperboard size={36} aria-hidden="true" />
+                    <div>
+                      <h2>Playing in mpv</h2>
+                      <p>Video opened in a separate macOS mpv window so the app stays responsive.</p>
+                    </div>
+                  </div>
+                ) : isPlayerBuffering ? (
                   <div className="video-center native-video-overlay">
                     <Loader2 className="spin" size={36} aria-hidden="true" />
                     <div>

@@ -19,6 +19,10 @@ pub struct NativeSurface {
     parent: isize,
     #[cfg(windows)]
     normal_style: isize,
+    #[cfg(target_os = "macos")]
+    view: isize,
+    #[cfg(target_os = "macos")]
+    parent: isize,
 }
 
 unsafe impl Send for NativeSurface {}
@@ -81,7 +85,43 @@ impl NativeSurface {
             });
         }
 
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        {
+            if std::env::var_os("TORRENTDOCK_ENABLE_MACOS_WID_SURFACE").is_none() {
+                return Err(
+                    "The experimental macOS libmpv window-id surface is disabled because it plays without rendering visibly.".into(),
+                );
+            }
+
+            use objc2::{rc::Retained, MainThreadMarker, MainThreadOnly};
+            use objc2_app_kit::NSView;
+            use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
+            let mtm = MainThreadMarker::new().ok_or_else(|| {
+                "The native macOS video surface must be created on the main thread.".to_string()
+            })?;
+            let parent = window.ns_view().map_err(|error| {
+                format!("Could not access the TorrentDock content view: {error}")
+            })?;
+            if parent.is_null() {
+                return Err("The TorrentDock content view was not available.".into());
+            }
+
+            let parent_view = unsafe { &*(parent.cast::<NSView>()) };
+            let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1.0, 1.0));
+            let video_view = NSView::initWithFrame(NSView::alloc(mtm), frame);
+            video_view.setWantsLayer(true);
+            video_view.setHidden(true);
+            parent_view.addSubview(&video_view);
+
+            let view = Retained::into_raw(video_view) as isize;
+            return Ok(Self {
+                view,
+                parent: parent as isize,
+            });
+        }
+
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             let _ = window;
             Err("The native surface adapter is not available on this platform yet.".into())
@@ -94,7 +134,12 @@ impl NativeSurface {
             self.hwnd as i64
         }
 
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        {
+            self.view as i64
+        }
+
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             0
         }
@@ -116,7 +161,16 @@ impl NativeSurface {
             .map_err(|error| format!("Could not schedule native surface positioning: {error}"))?;
         }
 
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        {
+            let surface = *self;
+            app.run_on_main_thread(move || {
+                surface.set_bounds_direct(rect, scale_factor, visible);
+            })
+            .map_err(|error| format!("Could not schedule native surface positioning: {error}"))?;
+        }
+
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             let _ = (app, rect, scale_factor, visible);
         }
@@ -133,7 +187,21 @@ impl NativeSurface {
             });
         }
 
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        {
+            let view = self.view;
+            let _ = app.run_on_main_thread(move || unsafe {
+                use objc2::rc::Retained;
+                use objc2_app_kit::NSView;
+
+                let retained = Retained::from_raw(view as *mut NSView);
+                if let Some(retained) = retained {
+                    retained.removeFromSuperview();
+                }
+            });
+        }
+
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             let _ = app;
         }
@@ -149,7 +217,16 @@ impl NativeSurface {
             .map_err(|error| format!("Could not schedule native fullscreen change: {error}"))?;
         }
 
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        {
+            let surface = *self;
+            app.run_on_main_thread(move || {
+                surface.set_fullscreen_direct(value);
+            })
+            .map_err(|error| format!("Could not schedule native fullscreen change: {error}"))?;
+        }
+
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             let _ = (app, value);
         }
@@ -206,4 +283,26 @@ impl NativeSurface {
 
         Ok(())
     }
+
+    #[cfg(target_os = "macos")]
+    fn set_bounds_direct(&self, rect: SurfaceBounds, _scale_factor: f64, visible: bool) {
+        use objc2_app_kit::NSView;
+        use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
+        let video_view = unsafe { &*(self.view as *mut NSView) };
+        let parent_view = unsafe { &*(self.parent as *mut NSView) };
+        let parent_bounds = parent_view.bounds();
+
+        let width = rect.width.round().max(1.0);
+        let height = rect.height.round().max(1.0);
+        let x = rect.x.round();
+        let y = (parent_bounds.size.height - rect.y - height).round();
+        let frame = CGRect::new(CGPoint::new(x, y), CGSize::new(width, height));
+
+        video_view.setFrame(frame);
+        video_view.setHidden(!visible);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_fullscreen_direct(&self, _value: bool) {}
 }

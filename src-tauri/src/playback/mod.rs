@@ -1,12 +1,13 @@
+mod backend;
 mod mpv;
 mod surface;
 
 use self::{
+    backend::PlayerBackend,
     mpv::{
-        MpvApi, MpvEventSnapshot, MpvHandle, MPV_EVENT_AUDIO_RECONFIG, MPV_EVENT_END_FILE,
-        MPV_EVENT_FILE_LOADED, MPV_EVENT_NONE, MPV_EVENT_PLAYBACK_RESTART, MPV_EVENT_SEEK,
-        MPV_EVENT_SHUTDOWN, MPV_EVENT_TRACKS_CHANGED, MPV_EVENT_VIDEO_RECONFIG, MPV_FORMAT_DOUBLE,
-        MPV_FORMAT_FLAG,
+        MpvEventSnapshot, MPV_EVENT_AUDIO_RECONFIG, MPV_EVENT_END_FILE, MPV_EVENT_FILE_LOADED,
+        MPV_EVENT_NONE, MPV_EVENT_PLAYBACK_RESTART, MPV_EVENT_SEEK, MPV_EVENT_SHUTDOWN,
+        MPV_EVENT_TRACKS_CHANGED, MPV_EVENT_VIDEO_RECONFIG,
     },
     surface::{NativeSurface, SurfaceBounds},
 };
@@ -25,19 +26,20 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use url::Url;
 
-const PLAYER_STATE_EVENT: &str = "player://state";
-const PLAYER_TIME_EVENT: &str = "player://time";
+pub(super) const PLAYER_STATE_EVENT: &str = "player://state";
+pub(super) const PLAYER_TIME_EVENT: &str = "player://time";
 const PLAYER_DURATION_EVENT: &str = "player://duration";
 const PLAYER_BUFFERING_EVENT: &str = "player://buffering";
 const PLAYER_TRACKS_EVENT: &str = "player://tracks";
 const PLAYER_VIDEO_EVENT: &str = "player://video-params";
 const PLAYER_AUDIO_EVENT: &str = "player://audio-params";
 const PLAYER_SEEK_EVENT: &str = "player://seek-complete";
-const PLAYER_END_EVENT: &str = "player://end";
-const PLAYER_WARNING_EVENT: &str = "player://warning";
+pub(super) const PLAYER_END_EVENT: &str = "player://end";
+pub(super) const PLAYER_WARNING_EVENT: &str = "player://warning";
 const PLAYER_ERROR_EVENT: &str = "player://error";
 
 static SUBTITLE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+const PLAYER_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,14 +71,14 @@ impl Default for PlayerCapabilities {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct StatePayload {
-    state: &'static str,
+pub(super) struct StatePayload {
+    pub(super) state: &'static str,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ValuePayload {
-    value: f64,
+pub(super) struct ValuePayload {
+    pub(super) value: f64,
 }
 
 #[derive(Clone, Serialize)]
@@ -87,8 +89,8 @@ struct BufferingPayload {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MessagePayload {
-    message: String,
+pub(super) struct MessagePayload {
+    pub(super) message: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -229,8 +231,10 @@ impl PlaybackService {
             })
             .map_err(|_| "The native player thread has stopped.".to_string())?;
         response_rx
-            .recv()
-            .map_err(|_| "The native player did not answer.".to_string())?
+            .recv_timeout(PLAYER_COMMAND_TIMEOUT)
+            .map_err(|_| {
+                "The native player did not answer before the command timed out.".to_string()
+            })?
     }
 }
 
@@ -249,8 +253,8 @@ pub fn player_initialize(
         return inner.capabilities.clone();
     }
 
-    let surface = match NativeSurface::create_on_main(window.clone()) {
-        Ok(surface) => surface,
+    let prepared_backend = match backend::prepare(&app, &window) {
+        Ok(prepared_backend) => prepared_backend,
         Err(error) => {
             inner.capabilities = PlayerCapabilities {
                 reason: Some(error),
@@ -270,51 +274,29 @@ pub fn player_initialize(
         }
     };
 
-    let library_candidates = mpv_library_candidates(&app);
-    let loaded_library = library_candidates
-        .iter()
-        .find_map(|path| MpvApi::load(path).ok().map(|api| (path.clone(), api)));
-    let Some((library_path, api)) = loaded_library else {
-        inner.capabilities = PlayerCapabilities {
-            reason: Some(format!(
-                "libmpv was not found. Checked libraries: {}.",
-                library_candidates
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
-            ..PlayerCapabilities::default()
-        };
-        let _ = app.emit(
-            PLAYER_WARNING_EVENT,
-            MessagePayload {
-                message: inner
-                    .capabilities
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| "Native playback is unavailable.".into()),
-            },
-        );
-        return inner.capabilities.clone();
-    };
-
     let (command_tx, command_rx) = mpsc::channel();
     let (ready_tx, ready_rx) = mpsc::channel();
     let worker_app = app.clone();
-    let runtime_description = library_path.display().to_string();
-    if let Err(error) = thread::Builder::new()
-        .name("torrentdock-mpv".into())
+    let runtime_description = prepared_backend.runtime_description;
+    let backend_name = prepared_backend.backend_name;
+    let supports_native_surface = prepared_backend.supports_native_surface;
+    let supports_embedded_tracks = prepared_backend.supports_embedded_tracks;
+    let supports_external_subtitles = prepared_backend.supports_external_subtitles;
+    let spawn_result = thread::Builder::new()
+        .name(format!("torrentdock-{backend_name}"))
         .spawn(move || {
-            let result = PlayerWorker::new(api, surface, worker_app).and_then(|mut worker| {
-                let _ = ready_tx.send(Ok(()));
-                worker.run(command_rx)
-            });
-            if let Err(error) = result {
+            let mut worker = PlayerWorker::new(
+                prepared_backend.backend,
+                prepared_backend.surface,
+                worker_app,
+            );
+            let _ = ready_tx.send(Ok(()));
+            if let Err(error) = worker.run(command_rx) {
                 let _ = ready_tx.send(Err(error));
             }
-        })
-    {
+        });
+
+    if let Err(error) = spawn_result {
         inner.capabilities = PlayerCapabilities {
             library_path: Some(runtime_description),
             reason: Some(format!("Could not start the native player thread: {error}")),
@@ -328,13 +310,13 @@ pub fn player_initialize(
             inner.sender = Some(command_tx);
             inner.capabilities = PlayerCapabilities {
                 available: true,
-                backend: "libmpv".into(),
+                backend: backend_name,
                 platform: std::env::consts::OS.into(),
                 library_path: Some(runtime_description),
                 reason: None,
-                supports_native_surface: true,
-                supports_embedded_tracks: true,
-                supports_external_subtitles: true,
+                supports_native_surface,
+                supports_embedded_tracks,
+                supports_external_subtitles,
             };
         }
         Ok(Err(error)) => {
@@ -523,10 +505,6 @@ pub fn player_set_surface_bounds(
     })
 }
 
-enum PlayerBackend {
-    LibMpv { api: MpvApi, handle: *mut MpvHandle },
-}
-
 struct PlayerWorker {
     backend: PlayerBackend,
     surface: Option<NativeSurface>,
@@ -535,48 +513,19 @@ struct PlayerWorker {
 }
 
 impl PlayerWorker {
-    fn new(api: MpvApi, surface: NativeSurface, app: AppHandle) -> Result<Self, String> {
-        let handle = api.create_handle()?;
-        let configure = (|| {
-            set_mpv_option(&api, handle, "wid", &surface.native_id().to_string())?;
-            set_mpv_option(&api, handle, "terminal", "no")?;
-            set_mpv_option(&api, handle, "idle", "yes")?;
-            set_mpv_option(&api, handle, "keep-open", "yes")?;
-            set_mpv_option(&api, handle, "force-window", "no")?;
-            set_mpv_option(&api, handle, "hwdec", "auto-safe")?;
-            set_mpv_option(&api, handle, "vo", "gpu-next")?;
-            set_mpv_option(&api, handle, "tone-mapping", "bt.2390")?;
-            set_mpv_option(&api, handle, "hdr-compute-peak", "yes")?;
-            #[cfg(windows)]
-            set_mpv_option(&api, handle, "gpu-api", "d3d11")?;
-            api.initialize(handle)
-                .map_err(|error| format!("Could not initialize libmpv: {error}"))?;
-            api.observe(handle, 1, "time-pos", MPV_FORMAT_DOUBLE)
-                .map_err(|error| format!("Could not observe libmpv time-pos: {error}"))?;
-            api.observe(handle, 2, "duration", MPV_FORMAT_DOUBLE)
-                .map_err(|error| format!("Could not observe libmpv duration: {error}"))?;
-            api.observe(handle, 3, "pause", MPV_FORMAT_FLAG)
-                .map_err(|error| format!("Could not observe libmpv pause: {error}"))?;
-            api.observe(handle, 4, "paused-for-cache", MPV_FORMAT_FLAG)
-                .map_err(|error| format!("Could not observe libmpv paused-for-cache: {error}"))?;
-            Ok(())
-        })();
-
-        if let Err(error) = configure {
-            api.terminate_destroy(handle);
-            return Err(error);
-        }
-
-        Ok(Self {
-            backend: PlayerBackend::LibMpv { api, handle },
-            surface: Some(surface),
+    fn new(backend: PlayerBackend, surface: Option<NativeSurface>, app: AppHandle) -> Self {
+        Self {
+            backend,
+            surface,
             app,
             subtitle_paths: Vec::new(),
-        })
+        }
     }
 
     fn run(&mut self, receiver: Receiver<WorkerMessage>) -> Result<(), String> {
         let mut last_metrics_emit = Instant::now();
+        let native_smoke_log = std::env::var_os("TORRENTDOCK_NATIVE_TEST_URL").is_some();
+        let mut native_smoke_time_reported = false;
 
         loop {
             loop {
@@ -627,6 +576,9 @@ impl PlayerWorker {
                             .emit(PLAYER_BUFFERING_EVENT, BufferingPayload { buffering });
                     }
                     MpvEventSnapshot::Event(MPV_EVENT_FILE_LOADED) => {
+                        if native_smoke_log {
+                            eprintln!("[mpv-smoke] file-loaded");
+                        }
                         let _ = self
                             .app
                             .emit(PLAYER_STATE_EVENT, StatePayload { state: "playing" });
@@ -637,15 +589,24 @@ impl PlayerWorker {
                     MpvEventSnapshot::Event(MPV_EVENT_TRACKS_CHANGED) => self.emit_tracks(),
                     MpvEventSnapshot::Event(MPV_EVENT_VIDEO_RECONFIG)
                     | MpvEventSnapshot::Event(MPV_EVENT_AUDIO_RECONFIG) => {
+                        if native_smoke_log {
+                            eprintln!("[mpv-smoke] media-reconfig");
+                        }
                         self.emit_duration();
                         self.emit_media_params();
                     }
                     MpvEventSnapshot::Event(MPV_EVENT_SEEK)
                     | MpvEventSnapshot::Event(MPV_EVENT_PLAYBACK_RESTART) => {
+                        if native_smoke_log {
+                            eprintln!("[mpv-smoke] playback-restart");
+                        }
                         self.emit_duration();
                         let _ = self.app.emit(PLAYER_SEEK_EVENT, ());
                     }
                     MpvEventSnapshot::Event(MPV_EVENT_END_FILE) => {
+                        if native_smoke_log {
+                            eprintln!("[mpv-smoke] end-file");
+                        }
                         let _ = self.app.emit(PLAYER_END_EVENT, ());
                         self.cleanup_subtitles();
                     }
@@ -653,10 +614,24 @@ impl PlayerWorker {
                     MpvEventSnapshot::Event(MPV_EVENT_NONE) => {}
                     _ => {}
                 },
+                _ => {
+                    self.backend.poll_external(&self.app);
+                    thread::sleep(Duration::from_millis(50));
+                }
             }
 
-            if last_metrics_emit.elapsed() >= Duration::from_millis(250) {
+            if matches!(self.backend, PlayerBackend::LibMpv { .. })
+                && last_metrics_emit.elapsed() >= Duration::from_millis(250)
+            {
                 self.emit_playback_metrics();
+                if native_smoke_log && !native_smoke_time_reported {
+                    if let Some(time) = self.read_f64_property("time-pos") {
+                        if time > 0.2 {
+                            eprintln!("[mpv-smoke] time-pos={time:.2}");
+                            native_smoke_time_reported = true;
+                        }
+                    }
+                }
                 last_metrics_emit = Instant::now();
             }
         }
@@ -670,64 +645,39 @@ impl PlayerWorker {
                 start_position,
             } => {
                 self.cleanup_subtitles();
-                let PlayerBackend::LibMpv { api, handle } = &self.backend;
-                let handle = *handle;
-                api.set_property(handle, "force-media-title", &title)?;
-                let mut args = vec!["loadfile".into(), url, "replace".into()];
-                if start_position > 0.0 {
-                    args.push(format!("start={start_position}"));
-                }
-                api.command(handle, &args)
-                    .map_err(|error| format!("Could not load media in libmpv: {error}"))
+                self.backend.load(&self.app, url, title, start_position)
             }
             PlayerCommand::SetProperty { name, value } => {
-                let PlayerBackend::LibMpv { api, handle } = &self.backend;
-                api.set_property(*handle, name, &value)
+                self.backend.set_property(&self.app, name, value)
             }
-            PlayerCommand::Command(args) => {
-                let PlayerBackend::LibMpv { api, handle } = &self.backend;
-                api.command(*handle, &args)
-            }
+            PlayerCommand::Command(args) => self.backend.command(&self.app, args),
             PlayerCommand::AddSubtitle { path, title } => {
-                let PlayerBackend::LibMpv { api, handle } = &self.backend;
-                let result = api.command(
-                    *handle,
-                    &[
-                        "sub-add".into(),
-                        path.display().to_string(),
-                        "select".into(),
-                        title,
-                    ],
-                );
-                if result.is_ok() {
+                let added = self.backend.add_subtitle(path.clone(), title)?;
+                if added {
                     self.subtitle_paths.push(path);
                     self.emit_tracks();
-                } else {
-                    let _ = fs::remove_file(path);
                 }
-                result
+                Ok(())
             }
             PlayerCommand::SetSurface {
                 rect,
                 scale_factor,
                 visible,
-            } => self
-                .surface
-                .as_ref()
-                .ok_or_else(|| "Native surface is unavailable.".to_string())?
-                .set_bounds_on_main(&self.app, rect, scale_factor, visible),
+            } => {
+                if let Some(surface) = &self.surface {
+                    surface.set_bounds_on_main(&self.app, rect, scale_factor, visible)?;
+                }
+                Ok(())
+            }
             PlayerCommand::SetFullscreen(value) => {
                 if let Some(surface) = &self.surface {
                     surface.set_fullscreen_on_main(&self.app, value)?;
                 }
-                let PlayerBackend::LibMpv { api, handle } = &self.backend;
-                api.set_property(*handle, "fullscreen", if value { "yes" } else { "no" })
+                self.backend.set_fullscreen(&self.app, value)
             }
             PlayerCommand::Stop => {
-                self.surface
-                    .as_ref()
-                    .ok_or_else(|| "Native surface is unavailable.".to_string())?
-                    .set_bounds_on_main(
+                if let Some(surface) = &self.surface {
+                    surface.set_bounds_on_main(
                         &self.app,
                         SurfaceBounds {
                             x: 0.0,
@@ -738,16 +688,21 @@ impl PlayerWorker {
                         1.0,
                         false,
                     )?;
+                }
                 self.cleanup_subtitles();
-                let PlayerBackend::LibMpv { api, handle } = &self.backend;
-                api.command(*handle, &["stop".into()])
+                self.backend.stop(&self.app)
             }
-            PlayerCommand::Shutdown => Ok(()),
+            PlayerCommand::Shutdown => {
+                self.backend.shutdown();
+                Ok(())
+            }
         }
     }
 
     fn emit_tracks(&self) {
-        let PlayerBackend::LibMpv { api, handle } = &self.backend;
+        let PlayerBackend::LibMpv { api, handle } = &self.backend else {
+            return;
+        };
         let handle = *handle;
         let count = api
             .get_property(handle, "track-list/count")
@@ -802,7 +757,9 @@ impl PlayerWorker {
     }
 
     fn emit_media_params(&self) {
-        let PlayerBackend::LibMpv { api, handle } = &self.backend;
+        let PlayerBackend::LibMpv { api, handle } = &self.backend else {
+            return;
+        };
         let handle = *handle;
         let parse_i64 = |name: &str| {
             api.get_property(handle, name)
@@ -854,13 +811,17 @@ impl PlayerWorker {
     }
 
     fn read_f64_property(&self, name: &str) -> Option<f64> {
-        let PlayerBackend::LibMpv { api, handle } = &self.backend;
+        let PlayerBackend::LibMpv { api, handle } = &self.backend else {
+            return None;
+        };
         api.get_property(*handle, name)
             .and_then(|value| value.parse::<f64>().ok())
     }
 
     fn read_duration_metadata(&self) -> Option<f64> {
-        let PlayerBackend::LibMpv { api, handle } = &self.backend;
+        let PlayerBackend::LibMpv { api, handle } = &self.backend else {
+            return None;
+        };
         let handle = *handle;
         [
             "metadata/by-key/DURATION",
@@ -914,9 +875,7 @@ impl PlayerWorker {
 impl Drop for PlayerWorker {
     fn drop(&mut self) {
         self.cleanup_subtitles();
-        match &mut self.backend {
-            PlayerBackend::LibMpv { api, handle } => api.terminate_destroy(*handle),
-        }
+        self.backend.terminate();
         if let Some(surface) = &self.surface {
             surface.destroy_on_main(&self.app);
         }
@@ -924,110 +883,129 @@ impl Drop for PlayerWorker {
 }
 
 fn run_native_smoke_test(app: AppHandle, window: WebviewWindow, url: String) -> Result<(), String> {
-    let surface = NativeSurface::create_on_main(window)?;
     let fullscreen_smoke = std::env::var_os("TORRENTDOCK_NATIVE_TEST_FULLSCREEN").is_some();
-    let smoke_bounds = if fullscreen_smoke {
-        SurfaceBounds {
-            x: 0.0,
-            y: 0.0,
-            width: 1280.0,
-            height: 720.0,
-        }
-    } else {
-        SurfaceBounds {
-            x: 80.0,
-            y: 220.0,
-            width: 920.0,
-            height: 520.0,
-        }
-    };
-    surface.set_bounds_on_main(&app, smoke_bounds, 1.0, true)?;
+    let prepared_backend = backend::prepare(&app, &window)?;
+    if let Some(surface) = prepared_backend.surface.as_ref() {
+        let smoke_bounds = if fullscreen_smoke {
+            SurfaceBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 1280.0,
+                height: 720.0,
+            }
+        } else {
+            SurfaceBounds {
+                x: 80.0,
+                y: 220.0,
+                width: 920.0,
+                height: 520.0,
+            }
+        };
+        surface.set_bounds_on_main(&app, smoke_bounds, 1.0, true)?;
+    }
 
-    if let Some((library_path, api)) = mpv_library_candidates(&app)
-        .into_iter()
-        .find_map(|path| MpvApi::load(&path).ok().map(|api| (path, api)))
-    {
-        eprintln!(
-            "[mpv-smoke] started libmpv {} in hwnd {}",
-            library_path.display(),
-            surface.native_id()
-        );
-        let mut worker = PlayerWorker::new(api, surface, app.clone())?;
-        let (command_tx, command_rx) = mpsc::channel();
-        let (response_tx, _response_rx) = mpsc::channel();
-        command_tx
-            .send(WorkerMessage {
-                command: PlayerCommand::Load {
-                    url,
-                    title: "TorrentDock native libmpv smoke test".into(),
-                    start_position: 0.0,
-                },
-                response: response_tx,
-            })
-            .map_err(|_| "Could not queue libmpv smoke load command.".to_string())?;
+    eprintln!(
+        "[mpv-smoke] started {} backend using {}",
+        prepared_backend.backend_name, prepared_backend.runtime_description
+    );
 
-        let shutdown_tx = command_tx.clone();
+    let mut worker = PlayerWorker::new(
+        prepared_backend.backend,
+        prepared_backend.surface,
+        app.clone(),
+    );
+    let (command_tx, command_rx) = mpsc::channel();
+    let (response_tx, _response_rx) = mpsc::channel();
+    command_tx
+        .send(WorkerMessage {
+            command: PlayerCommand::Load {
+                url,
+                title: "TorrentDock native playback smoke test".into(),
+                start_position: 0.0,
+            },
+            response: response_tx,
+        })
+        .map_err(|_| "Could not queue native smoke load command.".to_string())?;
+
+    if let Ok(subtitle_text) = std::env::var("TORRENTDOCK_NATIVE_TEST_SUBTITLE_TEXT") {
+        let subtitle_path = write_temporary_subtitle("smoke.srt", &subtitle_text)?;
+        let subtitle_tx = command_tx.clone();
         thread::Builder::new()
-            .name("torrentdock-mpv-smoke-timeout".into())
+            .name("torrentdock-mpv-smoke-subtitle".into())
             .spawn(move || {
-                thread::sleep(Duration::from_secs(60));
-                let (response, _) = mpsc::channel();
-                let _ = shutdown_tx.send(WorkerMessage {
-                    command: PlayerCommand::Shutdown,
-                    response,
-                });
+                thread::sleep(Duration::from_secs(2));
+                let (response_tx, response_rx) = mpsc::channel();
+                if subtitle_tx
+                    .send(WorkerMessage {
+                        command: PlayerCommand::AddSubtitle {
+                            path: subtitle_path,
+                            title: "TorrentDock smoke subtitle".into(),
+                        },
+                        response: response_tx,
+                    })
+                    .is_err()
+                {
+                    eprintln!("[mpv-smoke] could not queue subtitle command");
+                    return;
+                }
+                match response_rx.recv_timeout(PLAYER_COMMAND_TIMEOUT) {
+                    Ok(Ok(())) => eprintln!("[mpv-smoke] subtitle-added"),
+                    Ok(Err(error)) => eprintln!("[mpv-smoke] subtitle-error={error}"),
+                    Err(_) => eprintln!("[mpv-smoke] subtitle-timeout"),
+                }
             })
             .ok();
-
-        return worker.run(command_rx);
     }
 
-    Err("libmpv was not found for native smoke test.".into())
-}
+    if std::env::var_os("TORRENTDOCK_NATIVE_TEST_CLOSE_RESUME").is_some() {
+        let resume_tx = command_tx.clone();
+        thread::Builder::new()
+            .name("torrentdock-mpv-smoke-close-resume".into())
+            .spawn(move || {
+                thread::sleep(Duration::from_secs(4));
+                let _ = std::process::Command::new("pkill")
+                    .args(["-x", "mpv"])
+                    .status();
+                eprintln!("[mpv-smoke] external-close-sent");
+                thread::sleep(Duration::from_secs(2));
 
-fn set_mpv_option(
-    api: &MpvApi,
-    handle: *mut MpvHandle,
-    name: &'static str,
-    value: &str,
-) -> Result<(), String> {
-    api.set_option(handle, name, value)
-        .map_err(|error| format!("Could not set libmpv option {name}={value}: {error}"))
-}
-
-fn mpv_library_candidates(app: &AppHandle) -> Vec<PathBuf> {
-    let file_name = if cfg!(windows) {
-        "libmpv-2.dll"
-    } else if cfg!(target_os = "macos") {
-        "libmpv.2.dylib"
-    } else {
-        "libmpv.so.2"
-    };
-    let mut candidates = Vec::new();
-
-    if let Some(path) = std::env::var_os("TORRENTDOCK_MPV_LIBRARY") {
-        candidates.push(PathBuf::from(path));
-    }
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        candidates.push(resource_dir.join("mpv").join(file_name));
-        candidates.push(resource_dir.join(file_name));
-    }
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(directory) = executable.parent() {
-            candidates.push(directory.join(file_name));
-            candidates.push(directory.join("mpv").join(file_name));
-        }
-    }
-    candidates.push(PathBuf::from(file_name));
-    if cfg!(target_os = "macos") {
-        candidates.push(PathBuf::from("/opt/homebrew/lib/libmpv.dylib"));
-        candidates.push(PathBuf::from("/usr/local/lib/libmpv.dylib"));
-    } else if cfg!(target_os = "linux") {
-        candidates.push(PathBuf::from("/usr/lib/x86_64-linux-gnu/libmpv.so.2"));
-        candidates.push(PathBuf::from("/usr/lib/libmpv.so.2"));
+                let (response_tx, response_rx) = mpsc::channel();
+                if resume_tx
+                    .send(WorkerMessage {
+                        command: PlayerCommand::SetProperty {
+                            name: "pause",
+                            value: "no".into(),
+                        },
+                        response: response_tx,
+                    })
+                    .is_err()
+                {
+                    eprintln!("[mpv-smoke] could not queue resume command");
+                    return;
+                }
+                match response_rx.recv_timeout(PLAYER_COMMAND_TIMEOUT) {
+                    Ok(Ok(())) => eprintln!("[mpv-smoke] resume-after-close-ok"),
+                    Ok(Err(error)) => eprintln!("[mpv-smoke] resume-after-close-error={error}"),
+                    Err(_) => eprintln!("[mpv-smoke] resume-after-close-timeout"),
+                }
+            })
+            .ok();
     }
 
-    candidates
+    let shutdown_tx = command_tx.clone();
+    thread::Builder::new()
+        .name("torrentdock-mpv-smoke-timeout".into())
+        .spawn(move || {
+            thread::sleep(Duration::from_secs(60));
+            let (response, _) = mpsc::channel();
+            let _ = shutdown_tx.send(WorkerMessage {
+                command: PlayerCommand::Shutdown,
+                response,
+            });
+        })
+        .ok();
+
+    worker.run(command_rx)
 }
 
 fn validate_stream_url(value: &str) -> Result<(), String> {

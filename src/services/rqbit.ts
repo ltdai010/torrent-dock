@@ -478,8 +478,8 @@ export type LibraryTorrent = {
 
 // Lists every torrent the engine currently knows about, enriched with its
 // download stats. Used by the History page to clean up old downloads.
-export async function listLibraryTorrents(apiBase?: string): Promise<LibraryTorrent[]> {
-  const list = await listTorrents(apiBase);
+export async function listLibraryTorrents(apiBase?: string, timeoutMs = DEFAULT_PROBE_REQUEST_TIMEOUT_MS): Promise<LibraryTorrent[]> {
+  const list = await listTorrents(apiBase, timeoutMs);
   const torrents = list.torrents ?? [];
 
   return Promise.all(
@@ -490,7 +490,7 @@ export async function listLibraryTorrents(apiBase?: string): Promise<LibraryTorr
       let state: string | undefined;
 
       try {
-        const stats = await getTorrentStats(torrent.id, apiBase);
+        const stats = await getTorrentStats(torrent.id, apiBase, timeoutMs);
         progressBytes = Math.max(0, stats.progress_bytes ?? 0);
         totalBytes = Math.max(0, stats.total_bytes ?? 0);
         finished = Boolean(stats.finished);
