@@ -1,21 +1,13 @@
 # TorrentDock
 
-TorrentDock is a desktop-first torrent and magnet workflow app for legitimate content. The goal is to make authorized torrent streaming, downloads, and provider-based discovery easier without bundling piracy-oriented catalogs.
-
-## Current Status
-
-This repository contains the initial Tauri + React + TypeScript scaffold and the first technical docs:
-
-- `techdocs/knowledge-exploration.md`: BitTorrent, magnet, peer discovery, DHT, streaming, and safety deep dive.
-- `techdocs/engineering-spec.md`: Implementation architecture, data model, commands, flows, phases, and tests.
+TorrentDock is a desktop-first torrent and magnet workflow app for legitimate content. It uses Electron, React, TypeScript, Video.js, and an rqbit sidecar to make authorized torrent streaming and downloads easier without bundling piracy-oriented catalogs.
 
 ## Development
 
 Prerequisites:
 
-- Node.js
-- Rust
-- Tauri desktop prerequisites for your OS
+- Node.js 22+
+- npm
 
 Install dependencies:
 
@@ -33,10 +25,12 @@ Run the desktop app:
 
 ```bash
 npm run sidecar:prepare
-npm run tauri:dev
+npm run electron:dev
 ```
 
-`sidecar:prepare` downloads the correct rqbit sidecar binary for the current Rust target triple into `src-tauri/binaries/`. Docker web development still starts rqbit as a Compose service, but packaged desktop builds use the Tauri sidecar path.
+`sidecar:prepare` downloads the correct rqbit sidecar binary into `resources/binaries/`. Docker web development still starts rqbit as a Compose service, while packaged desktop builds bundle the sidecar as an Electron resource.
+
+## Verification
 
 Build the frontend:
 
@@ -44,47 +38,11 @@ Build the frontend:
 npm run build
 ```
 
-Run the full check suite locally when Node and Rust are installed:
+Run the full local check suite:
 
 ```bash
 npm run check:all
 ```
-
-## macOS source builds
-
-macOS builds must be produced on macOS with the Tauri desktop prerequisites installed. From a Mac:
-
-```bash
-npm install
-make mac-check
-make mac-dev
-make mac-build
-```
-
-`make mac-build` prepares the rqbit sidecar for the current Mac Rust target triple, verifies the optional mpv runtime manifest, and runs the Tauri build for that target.
-
-For a universal macOS app bundle:
-
-```bash
-make mac-build-universal
-```
-
-To choose a specific target explicitly:
-
-```bash
-make mac-build MAC_TARGET=aarch64-apple-darwin
-make mac-build MAC_TARGET=x86_64-apple-darwin
-```
-
-The equivalent npm commands are:
-
-```bash
-npm run mac:check
-npm run mac:dev
-npm run mac:build
-```
-
-Native libmpv is loaded dynamically. If `src-tauri/mpv/libmpv.2.dylib` is not present, the app can still launch and use the non-native fallback path; install or bundle a pinned LGPL-compatible libmpv runtime before validating native playback on macOS.
 
 Run the same checks in Docker:
 
@@ -102,4 +60,33 @@ Then open:
 
 ```text
 http://localhost:1420
+```
+
+## Desktop Builds
+
+Windows:
+
+```bash
+npm run electron:build:win
+```
+
+macOS builds must be produced on macOS:
+
+```bash
+npm install
+make mac-check
+make mac-dev
+make mac-build
+```
+
+For a universal macOS app bundle:
+
+```bash
+make mac-build-universal
+```
+
+Linux:
+
+```bash
+npm run electron:build:linux
 ```

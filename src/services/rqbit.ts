@@ -1,10 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
-
-declare global {
-  interface Window {
-    __TAURI_INTERNALS__?: unknown;
-  }
-}
+import { invokeCommand, isDesktopRuntime } from "./desktopRuntime";
 
 export type RqbitFile = {
   index: number;
@@ -131,10 +125,6 @@ type RqbitProxyResult = {
   body: string;
 };
 
-function isTauriRuntime() {
-  return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
-}
-
 function extractRqbitPath(url: string) {
   const parsed = new URL(url, RQBIT_DIRECT_BASE);
   return `${parsed.pathname}${parsed.search}`;
@@ -157,12 +147,11 @@ function headerValue(headers: HeadersInit | undefined, name: string) {
   return record[name] ?? record[name.toLowerCase()];
 }
 
-// In the packaged Tauri app the webview origin (http://tauri.localhost) cannot
-// call the rqbit HTTP API directly because rqbit does not return CORS headers
-// for that origin. Route those requests through a Rust command instead. In the
-// browser dev server the Vite proxy handles "/rqbit", so plain fetch is used.
+// In the packaged Electron app the page uses file://, so rqbit API calls go
+// through the main-process bridge. In the browser dev server the Vite proxy
+// handles "/rqbit", so plain fetch is used.
 async function requestRqbit(url: string, init?: RequestInit): Promise<RqbitHttpResponse> {
-  if (!isTauriRuntime()) {
+  if (!isDesktopRuntime()) {
     return fetch(url, init);
   }
 
@@ -172,7 +161,7 @@ async function requestRqbit(url: string, init?: RequestInit): Promise<RqbitHttpR
 
   const method = (init?.method ?? "GET").toUpperCase();
   const body = typeof init?.body === "string" ? init.body : undefined;
-  const request = invoke<RqbitProxyResult>("rqbit_api_request", {
+  const request = invokeCommand<RqbitProxyResult>("rqbit_api_request", {
     method,
     path: extractRqbitPath(url),
     body: body ?? null,
@@ -362,22 +351,9 @@ export function getStreamUrl(apiBase: string | undefined, torrentId: number, fil
   return `${apiBase ?? DEFAULT_API_BASE}/torrents/${torrentId}/stream/${fileIndex}`;
 }
 
-// Source URL for the <video> element.
-//
-// In the browser dev server the stream is reached same-origin through the Vite
-// proxy ("/rqbit/..."), so partial/progressive streaming works while the file
-// is still downloading. In the packaged app the webview origin is
-// "http://tauri.localhost" and loading "http://127.0.0.1:3030" directly is
-// cross-origin: a fully-downloaded file happens to load, but rqbit's long-lived
-// blocking stream response for an in-progress file does not. To match the dev
-// behavior we serve the stream same-origin through the in-process "stream"
-// custom protocol, which proxies rqbit in bounded Range chunks. On Windows the
-// scheme is exposed as http://stream.localhost/<torrentId>/<fileIndex>.
+// Source URL for the <video> element. Electron Chromium/FFmpeg owns playback,
+// so the player receives rqbit's loopback range endpoint directly.
 export function getVideoStreamSrc(apiBase: string | undefined, torrentId: number, fileIndex: number) {
-  if (isTauriRuntime()) {
-    return `http://stream.localhost/${torrentId}/${fileIndex}`;
-  }
-
   return getStreamUrl(apiBase, torrentId, fileIndex);
 }
 
@@ -628,8 +604,8 @@ async function fetchWithTimeout(
   init: RequestInit | undefined,
   timeoutMs: number
 ): Promise<RqbitHttpResponse> {
-  if (isTauriRuntime()) {
-    // The Rust proxy command applies its own request timeout.
+  if (isDesktopRuntime()) {
+    // The desktop proxy command applies its own request timeout.
     return requestRqbit(url, init);
   }
 

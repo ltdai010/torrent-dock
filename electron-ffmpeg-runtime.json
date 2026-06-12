@@ -1,0 +1,22 @@
+{
+  "runtime": "electron-chromium-ffmpeg",
+  "electronVersion": "42.4.0",
+  "chromiumVersion": "148.0.7778.254",
+  "platforms": {
+    "win32-x64": {
+      "library": "node_modules/electron/dist/ffmpeg.dll",
+      "size": 3057152,
+      "sha256": "80d1ff5d7689071edae78164eacf92e4924689936d8cd818340377318b0a5da6",
+      "source": "npm:electron@42.4.0"
+    }
+  },
+  "verifiedFixtures": [
+    "mkv_h264",
+    "mp4_hevc",
+    "mkv_eac3"
+  ],
+  "notes": [
+    "This manifest records the Electron FFmpeg runtime that passed the local HTTP range playback probes.",
+    "If ffmpeg.dll is replaced with a custom build, update size, sha256, source, license, and rerun npm run electron:verify-media."
+  ]
+}
