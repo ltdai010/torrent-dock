@@ -16,7 +16,8 @@
         "width": 1200,
         "height": 820,
         "minWidth": 960,
-        "minHeight": 640
+        "minHeight": 640,
+        "transparent": true
       }
     ],
     "security": {
@@ -28,6 +29,11 @@
     "targets": "all",
     "externalBin": [
       "binaries/rqbit"
+    ],
+    "resources": [
+      "mpv",
+      "mpv-runtime.json",
+      "THIRD_PARTY_NOTICES.md"
     ],
     "icon": [
       "icons/32x32.png",

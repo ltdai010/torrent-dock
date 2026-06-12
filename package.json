@@ -8,7 +8,12 @@
     "build": "tsc && vite build",
     "check:all": "npm run build && npm audit && npm run tauri:check",
     "preview": "vite preview",
+    "mpv:verify": "node scripts/verify-mpv-runtime.mjs",
     "sidecar:prepare": "node scripts/prepare-rqbit-sidecar.mjs",
+    "mac:prepare": "npm run sidecar:prepare && npm run mpv:verify",
+    "mac:check": "npm run build && cargo check --manifest-path src-tauri/Cargo.toml",
+    "mac:dev": "npm run mac:prepare && tauri dev",
+    "mac:build": "npm run mac:prepare && tauri build",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:check": "cargo check --manifest-path src-tauri/Cargo.toml"

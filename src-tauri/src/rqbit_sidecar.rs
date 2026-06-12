@@ -111,6 +111,10 @@ pub async fn get_rqbit_endpoint() -> String {
 
 #[tauri::command]
 pub async fn stop_rqbit_sidecar(state: tauri::State<'_, RqbitSidecarState>) -> Result<(), String> {
+    stop_tracked_rqbit_sidecar(&state)
+}
+
+pub fn stop_tracked_rqbit_sidecar(state: &RqbitSidecarState) -> Result<(), String> {
     let child = state
         .child
         .lock()

@@ -174,15 +174,11 @@ pub async fn search_movie_titles(query: String) -> Result<Vec<MovieTitleCandidat
         .next()
         .ok_or_else(|| "Enter at least 2 characters to find title matches.".to_string())?;
     let url = format!("https://v3.sg.media-imdb.com/suggestion/{first_character}/{slug}.json");
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|error| {
-            let message = format!("title lookup failed: {error}");
-            log_catalog_diagnostic(&format!("request error for {url}: {error:?}"));
-            message
-        })?;
+    let response = client.get(&url).send().await.map_err(|error| {
+        let message = format!("title lookup failed: {error}");
+        log_catalog_diagnostic(&format!("request error for {url}: {error:?}"));
+        message
+    })?;
     let status = response.status();
 
     if !status.is_success() {

@@ -1,0 +1,100 @@
+{
+  "schema": 1,
+  "updatedAt": "2026-06-11",
+  "policy": {
+    "loader": "dynamic",
+    "fallback": "html-player",
+    "licenseMode": "LGPL-only",
+    "gplEncodingDependencies": "excluded",
+    "hdr": "tone-map-to-sdr"
+  },
+  "sources": {
+    "mpv": {
+      "repository": "https://github.com/mpv-player/mpv",
+      "tag": "v0.41.0",
+      "commit": "41f6a645068483470267271e1d09966ca3b9f413",
+      "license": "LGPL-2.1-or-later when built with LGPL options"
+    },
+    "ffmpeg": {
+      "repository": "https://github.com/FFmpeg/FFmpeg",
+      "tag": "n8.1.1",
+      "commit": "239f2c733de417201d7ad3b3b8b0d9b63285b2b1",
+      "license": "LGPL-2.1-or-later with --disable-gpl --disable-nonfree"
+    }
+  },
+  "requiredBuildFlags": {
+    "ffmpeg": [
+      "--disable-gpl",
+      "--disable-nonfree",
+      "--enable-shared",
+      "--disable-static"
+    ],
+    "mpv": [
+      "-Dlibmpv=true",
+      "-Dgpl=false",
+      "-Dcplayer=false",
+      "-Dlua=disabled",
+      "-Djavascript=disabled"
+    ]
+  },
+  "runtimes": [
+    {
+      "platform": "windows-x86_64",
+      "libraryName": "libmpv-2.dll",
+      "loaderSearchPath": "resources/mpv/libmpv-2.dll",
+      "sourceArchive": "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-20260607-git-71ebd08.7z",
+      "files": [
+        {
+          "path": "mpv/libmpv-2.dll",
+          "sha256": "02FA97CBDB32A651ADDBB0EAFCDC8446E3B4CB7A09DA83518DAC4FBF8D62FD81",
+          "required": true
+        }
+      ]
+    },
+    {
+      "platform": "macos-x86_64",
+      "libraryName": "libmpv.2.dylib",
+      "loaderSearchPath": "Contents/Resources/mpv/libmpv.2.dylib",
+      "rpath": "@loader_path/../Resources/mpv",
+      "files": [
+        {
+          "path": "mpv/libmpv.2.dylib",
+          "sha256": "TODO-build-artifact-sha256",
+          "required": false
+        }
+      ]
+    },
+    {
+      "platform": "macos-aarch64",
+      "libraryName": "libmpv.2.dylib",
+      "loaderSearchPath": "Contents/Resources/mpv/libmpv.2.dylib",
+      "rpath": "@loader_path/../Resources/mpv",
+      "files": [
+        {
+          "path": "mpv/libmpv.2.dylib",
+          "sha256": "TODO-build-artifact-sha256",
+          "required": false
+        }
+      ]
+    },
+    {
+      "platform": "linux-x86_64",
+      "libraryName": "libmpv.so.2",
+      "loaderSearchPath": "resources/mpv/libmpv.so.2",
+      "rpath": "$ORIGIN/../resources/mpv",
+      "files": [
+        {
+          "path": "mpv/libmpv.so.2",
+          "sha256": "TODO-build-artifact-sha256",
+          "required": false
+        }
+      ]
+    }
+  ],
+  "validation": [
+    "npm run mpv:verify -- --strict after runtime files are produced",
+    "Confirm ffmpeg configure output does not include GPL or nonfree",
+    "Confirm mpv build summary has libmpv enabled and GPL disabled",
+    "Run five Stop/Start cycles against incomplete torrent streams"
+  ]
+}

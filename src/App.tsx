@@ -13,24 +13,27 @@ import {
   ListChecks,
   Loader2,
   Magnet,
+  Maximize2,
+  Minimize2,
   Minus,
   Play,
   Plus,
   RadioTower,
   Search,
   ShieldCheck,
-  Square,
   StepBack,
   StepForward,
   Trash2,
-  Upload
+  Upload,
+  Volume2,
+  VolumeX
 } from "lucide-react";
 import {
   getTorrentDownloadProgress,
+  getStreamUrl,
   getVideoStreamSrc,
   isSupportedTorrentSource,
   listLibraryTorrents,
-  pauseTorrent,
   readTorrentFileAsText,
   removeTorrent,
   resumeTorrent,
@@ -51,12 +54,35 @@ import { formatMovieSearchTitle, sanitizeMediaSearchTitle, searchMovieTitles, ty
 import { downloadSubSourceSubtitle, searchSubSourceSubtitles, type SubSourceSubtitleCandidate } from "./services/subsource";
 import { dedupeProviderResults, getProviderResultSource, searchTorrentSources } from "./services/torrentSources";
 import type { ProviderResult, ProviderSearchError } from "./domain/torrent";
+import {
+  addNativeSubtitleText,
+  initializeNativePlayer,
+  listenNativePlayerEvents,
+  loadNativePlayer,
+  pauseNativePlayer,
+  playNativePlayer,
+  seekNativePlayer,
+  selectNativeAudioTrack,
+  selectNativeSubtitleTrack,
+  setNativePlayerMuted,
+  setNativePlayerRate,
+  setNativePlayerFullscreen,
+  setNativePlayerVolume,
+  setNativeSubtitleDelay,
+  setNativeSubtitleScale,
+  setNativeSurfaceBounds,
+  stopNativePlayer,
+  type NativePlayerTrack,
+  type PlayerCapabilities
+} from "./services/nativePlayer";
 
 type MetadataState = "idle" | "fetching" | "ready" | "starting" | "streaming" | "stopped" | "error";
 type SourceSearchState = "idle" | "searching" | "ready" | "error";
 type CatalogSearchState = "idle" | "searching" | "ready" | "error";
 type OnlineSubtitleSearchState = "idle" | "searching" | "ready" | "loading" | "error";
 type OnlineSubtitleProvider = "subsource" | "opensubtitles";
+type PlaybackBackend = "native" | "html";
+type CursorPosition = { x: number; y: number };
 type OnlineSubtitleCandidate = {
   provider: OnlineSubtitleProvider;
   id: string;
@@ -84,6 +110,17 @@ const subtitleExtensions = new Set([".srt", ".vtt"]);
 const subtitleShiftStepSeconds = 0.5;
 const minSubtitleSizePercent = 70;
 const maxSubtitleSizePercent = 180;
+const defaultPlayerCapabilities: PlayerCapabilities = {
+  available: false,
+  backend: "html",
+  platform: "browser",
+  libraryPath: null,
+  reason: "Native playback has not been initialized yet.",
+  supportsNativeSurface: false,
+  supportsEmbeddedTracks: false,
+  supportsExternalSubtitles: false
+};
+const playbackRates = [0.5, 0.75, 1, 1.25, 1.5, 2];
 const onlineSubtitleProviderStorageKey = "torrentdock.onlineSubtitleProvider";
 const subSourceApiKeyStorageKey = "torrentdock.subSourceApiKey";
 const subSourceLanguageStorageKey = "torrentdock.subSourceLanguage";
@@ -157,6 +194,23 @@ function formatPercentage(value: number) {
   }
 
   return `${value.toFixed(value >= 10 ? 0 : 1)}%`;
+}
+
+function formatPlaybackTime(value: number) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "00:00";
+  }
+
+  const totalSeconds = Math.floor(value);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return [hours, minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":");
+  }
+
+  return [minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":");
 }
 
 function formatSubtitleOffset(value: number) {
@@ -432,9 +486,14 @@ function getErrorMessage(error: unknown) {
 
 function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const playerPanelRef = useRef<HTMLElement | null>(null);
+  const videoSurfaceRef = useRef<HTMLDivElement | null>(null);
+  const playerToolbarRef = useRef<HTMLDivElement | null>(null);
   const activeLoadAbortRef = useRef<AbortController | null>(null);
   const activeTorrentIdRef = useRef<number | null>(null);
   const stoppedLoadControllersRef = useRef<WeakSet<AbortController>>(new WeakSet());
+  const isNativePlaybackRef = useRef(false);
+  const isPlayerFullscreenRef = useRef(false);
   const [torrentInput, setTorrentInput] = useState("");
   const [metadataState, setMetadataState] = useState<MetadataState>("idle");
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
@@ -442,6 +501,23 @@ function App() {
   const [engineBaseUrl, setEngineBaseUrl] = useState<string | null>(null);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [videoError, setVideoError] = useState<string | null>(null);
+  const [nativeCapabilities, setNativeCapabilities] = useState<PlayerCapabilities>(defaultPlayerCapabilities);
+  const [playbackBackend, setPlaybackBackend] = useState<PlaybackBackend>("native");
+  const [playerState, setPlayerState] = useState<"idle" | "loading" | "playing" | "paused" | "stopped" | "ended">("idle");
+  const [playerTime, setPlayerTime] = useState(0);
+  const [playerDuration, setPlayerDuration] = useState(0);
+  const [isPlayerBuffering, setIsPlayerBuffering] = useState(false);
+  const [playerVolume, setPlayerVolume] = useState(100);
+  const [isPlayerMuted, setIsPlayerMuted] = useState(false);
+  const [playerRate, setPlayerRate] = useState(1);
+  const [playerTracks, setPlayerTracks] = useState<NativePlayerTrack[]>([]);
+  const [selectedAudioTrackId, setSelectedAudioTrackId] = useState<number | null>(null);
+  const [selectedSubtitleTrackId, setSelectedSubtitleTrackId] = useState<number | null>(null);
+  const [isPlayerFullscreen, setIsPlayerFullscreen] = useState(false);
+  const [playerControlsVisible, setPlayerControlsVisible] = useState(true);
+  const [pendingSeekTime, setPendingSeekTime] = useState<number | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<TorrentDownloadProgress | null>(null);
+  const [surfaceSyncNonce, setSurfaceSyncNonce] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [sourceQuery, setSourceQuery] = useState("");
   const [sourceSearchState, setSourceSearchState] = useState<SourceSearchState>("idle");
@@ -453,7 +529,6 @@ function App() {
   const [catalogResults, setCatalogResults] = useState<MovieTitleCandidate[]>([]);
   const [catalogErrorMessage, setCatalogErrorMessage] = useState<string | null>(null);
   const [selectedCatalogTitle, setSelectedCatalogTitle] = useState<MovieTitleCandidate | null>(null);
-  const [downloadProgress, setDownloadProgress] = useState<TorrentDownloadProgress | null>(null);
   const [subtitleRawText, setSubtitleRawText] = useState<string | null>(null);
   const [subtitleFileName, setSubtitleFileName] = useState<string | null>(null);
   const [subtitleTrackUrl, setSubtitleTrackUrl] = useState<string | null>(null);
@@ -475,7 +550,6 @@ function App() {
   const [onlineSubtitleError, setOnlineSubtitleError] = useState<string | null>(null);
   const [onlineSubtitleLoadingResultId, setOnlineSubtitleLoadingResultId] = useState<string | null>(null);
   const [activeOnlineResultId, setActiveOnlineResultId] = useState<string | null>(null);
-  const [isStoppingTorrent, setIsStoppingTorrent] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [historyItems, setHistoryItems] = useState<LibraryTorrent[]>([]);
   const [historyState, setHistoryState] = useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -486,8 +560,11 @@ function App() {
   const playableFiles = useMemo(() => session?.files.filter(isPlayable) ?? [], [session]);
   const subtitleFiles = useMemo(() => session?.files.filter(isSubtitleFile) ?? [], [session]);
   const selectedFile = playableFiles[selectedFileIndex] ?? playableFiles[0];
+  const isNativeAvailable = nativeCapabilities.available;
+  const isNativePlayback = playbackBackend === "native" && isNativeAvailable;
+  const audioTracks = useMemo(() => playerTracks.filter((track) => track.kind === "audio"), [playerTracks]);
+  const embeddedSubtitleTracks = useMemo(() => playerTracks.filter((track) => track.kind === "subtitle"), [playerTracks]);
   const isTorrentLoading = metadataState === "fetching" || metadataState === "starting";
-  const hasActivePlaybackLoad = isTorrentLoading || Boolean(streamUrl);
   const normalizedEntry = sourceQuery.trim();
   const entryIsTorrentSource = isTorrentSourceInput(normalizedEntry);
   const shouldShowCatalogStatus = catalogSearchState !== "idle" || catalogResults.length > 0;
@@ -499,6 +576,12 @@ function App() {
     metadataState === "ready" ||
     metadataState === "streaming" ||
     (metadataState === "error" && torrentInput.length > 0);
+  const playerPosition = isNativePlayback ? playerTime : (videoRef.current?.currentTime ?? 0);
+  const rawPlayerLength = isNativePlayback ? playerDuration : (videoRef.current?.duration ?? 0);
+  const playerLength = Number.isFinite(rawPlayerLength) && rawPlayerLength > 0 ? rawPlayerLength : 0;
+  const displayedPlayerPosition = pendingSeekTime ?? playerPosition;
+  const hasKnownPlayerLength = Number.isFinite(playerLength) && playerLength > 0;
+  const playerSeekMax = Math.max(1, Math.round(hasKnownPlayerLength ? playerLength : Math.max(3600, displayedPlayerPosition + 600)));
   const progressPercent = downloadProgress?.percent ?? 0;
   const progressLabel = formatPercentage(progressPercent);
   const progressBytesLabel =
@@ -513,6 +596,205 @@ function App() {
     : selectedCatalogTitle
       ? "browse"
       : "search";
+
+  useEffect(() => {
+    isNativePlaybackRef.current = isNativePlayback;
+  }, [isNativePlayback]);
+
+  useEffect(() => {
+    isPlayerFullscreenRef.current = isPlayerFullscreen;
+  }, [isPlayerFullscreen]);
+
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    let isMounted = true;
+
+    void listenNativePlayerEvents({
+      onState: (state) => {
+        if (state === "playing" || state === "paused") {
+          setPlayerState(state);
+        }
+      },
+      onTime: (value) => {
+        setPlayerTime(value);
+      },
+      onDuration: (value) => {
+        if (Number.isFinite(value) && value > 0) {
+          setPlayerDuration(value);
+        } else {
+          setPlayerDuration(0);
+        }
+      },
+      onBuffering: setIsPlayerBuffering,
+      onTracks: setPlayerTracks,
+      onEnd: () => {
+        setPlayerState("ended");
+        setMetadataState((currentState) => (currentState === "streaming" ? "ready" : currentState));
+      },
+      onWarning: setVideoError,
+      onError: (message) => {
+        setVideoError(message);
+        setMetadataState("ready");
+      }
+    }).then((unlisten) => {
+      if (isMounted) {
+        cleanup = unlisten;
+      } else {
+        unlisten();
+      }
+    });
+
+    return () => {
+      isMounted = false;
+      cleanup?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const selectedAudio = audioTracks.find((track) => track.selected);
+    const selectedSubtitle = embeddedSubtitleTracks.find((track) => track.selected);
+    setSelectedAudioTrackId(selectedAudio?.id ?? null);
+    setSelectedSubtitleTrackId(selectedSubtitle?.id ?? null);
+  }, [audioTracks, embeddedSubtitleTracks]);
+
+  useEffect(() => {
+    if (!isNativePlayback || !streamUrl || viewMode !== "player") {
+      if (isNativeAvailable) {
+        void setNativeSurfaceBounds({ x: 0, y: 0, width: 1, height: 1 }, window.devicePixelRatio || 1, false).catch(() => undefined);
+      }
+      return undefined;
+    }
+
+    const element = videoSurfaceRef.current;
+
+    if (!element) {
+      return undefined;
+    }
+
+    let frameId = 0;
+    const syncSurface = () => {
+      window.cancelAnimationFrame(frameId);
+      frameId = window.requestAnimationFrame(() => {
+        const rect = element.getBoundingClientRect();
+        const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
+        const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+        const left = Math.max(0, rect.left);
+        const top = Math.max(0, rect.top);
+        const right = Math.min(viewportWidth, rect.right);
+        const toolbarHeight =
+          isPlayerFullscreenRef.current && playerControlsVisible ? (playerToolbarRef.current?.getBoundingClientRect().height ?? 0) + 28 : 0;
+        const bottom = Math.max(top, Math.min(viewportHeight, rect.bottom) - toolbarHeight);
+        const width = Math.max(0, right - left);
+        const height = Math.max(0, bottom - top);
+        const visible =
+          metadataState === "streaming" &&
+          Boolean(streamUrl) &&
+          width >= 16 &&
+          height >= 16 &&
+          rect.bottom > 0 &&
+          rect.right > 0 &&
+          rect.top < viewportHeight &&
+          rect.left < viewportWidth;
+
+        void setNativeSurfaceBounds(
+          {
+            x: left,
+            y: top,
+            width,
+            height
+          },
+          1,
+          visible
+        ).catch(setVideoError);
+      });
+    };
+
+    const resizeObserver = new ResizeObserver(syncSurface);
+    resizeObserver.observe(element);
+    syncSurface();
+    window.addEventListener("resize", syncSurface);
+    window.addEventListener("scroll", syncSurface, true);
+    window.visualViewport?.addEventListener("resize", syncSurface);
+    window.visualViewport?.addEventListener("scroll", syncSurface);
+
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", syncSurface);
+      window.removeEventListener("scroll", syncSurface, true);
+      window.visualViewport?.removeEventListener("resize", syncSurface);
+      window.visualViewport?.removeEventListener("scroll", syncSurface);
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [isNativeAvailable, isNativePlayback, metadataState, streamUrl, viewMode, isPlayerFullscreen, playerControlsVisible, surfaceSyncNonce]);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const fullscreen = document.fullscreenElement === playerPanelRef.current;
+      isPlayerFullscreenRef.current = fullscreen;
+      setIsPlayerFullscreen(fullscreen);
+      setPlayerControlsVisible(true);
+      requestSurfaceResync();
+      window.setTimeout(requestSurfaceResync, 160);
+      window.setTimeout(requestSurfaceResync, 420);
+
+      if (isNativePlaybackRef.current && !fullscreen) {
+        void setNativePlayerFullscreen(false).catch(() => undefined);
+      }
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isPlayerFullscreen) {
+      setPlayerControlsVisible(true);
+      return undefined;
+    }
+
+    let hideTimer = window.setTimeout(() => setPlayerControlsVisible(false), 2200);
+    const showControls = () => {
+      setPlayerControlsVisible(true);
+      window.clearTimeout(hideTimer);
+      hideTimer = window.setTimeout(() => setPlayerControlsVisible(false), 2200);
+    };
+
+    const panel = playerPanelRef.current;
+    let lastCursor: CursorPosition | null = null;
+    panel?.addEventListener("mousemove", showControls);
+    panel?.addEventListener("pointerdown", showControls);
+    panel?.addEventListener("focusin", showControls);
+    document.addEventListener("mousemove", showControls);
+    document.addEventListener("pointermove", showControls);
+    document.addEventListener("keydown", showControls);
+    const cursorPoll = window.setInterval(() => {
+      void invoke<CursorPosition | null>("get_cursor_position")
+        .then((position) => {
+          if (!position) {
+            return;
+          }
+
+          if (lastCursor && (lastCursor.x !== position.x || lastCursor.y !== position.y)) {
+            showControls();
+          }
+          lastCursor = position;
+        })
+        .catch(() => undefined);
+    }, 160);
+
+    return () => {
+      window.clearTimeout(hideTimer);
+      window.clearInterval(cursorPoll);
+      panel?.removeEventListener("mousemove", showControls);
+      panel?.removeEventListener("pointerdown", showControls);
+      panel?.removeEventListener("focusin", showControls);
+      document.removeEventListener("mousemove", showControls);
+      document.removeEventListener("pointermove", showControls);
+      document.removeEventListener("keydown", showControls);
+    };
+  }, [isPlayerFullscreen]);
 
   useEffect(() => {
     window.localStorage.setItem(onlineSubtitleProviderStorageKey, onlineSubtitleProvider);
@@ -611,6 +893,36 @@ function App() {
       window.clearTimeout(timeout);
     };
   }, [streamUrl, subtitleFileName, subtitleTrackUrl]);
+
+  useEffect(() => {
+    if (!isNativePlayback || !streamUrl || !subtitleRawText || !subtitleFileName) {
+      return;
+    }
+
+    void addNativeSubtitleText(subtitleFileName, subtitleRawText).catch((error: unknown) => {
+      setSubtitleError(getErrorMessage(error));
+    });
+  }, [isNativePlayback, streamUrl, subtitleFileName, subtitleRawText]);
+
+  useEffect(() => {
+    if (!isNativePlayback || !streamUrl) {
+      return;
+    }
+
+    void setNativeSubtitleDelay(subtitleOffsetSeconds).catch((error: unknown) => {
+      setSubtitleError(getErrorMessage(error));
+    });
+  }, [isNativePlayback, streamUrl, subtitleOffsetSeconds]);
+
+  useEffect(() => {
+    if (!isNativePlayback || !streamUrl) {
+      return;
+    }
+
+    void setNativeSubtitleScale(subtitleSizePercent / 100).catch((error: unknown) => {
+      setSubtitleError(getErrorMessage(error));
+    });
+  }, [isNativePlayback, streamUrl, subtitleSizePercent]);
 
   useEffect(() => {
     if (!engineBaseUrl || typeof session?.torrentId !== "number" || !streamUrl) {
@@ -828,44 +1140,49 @@ function App() {
 
     activeLoadAbortRef.current = null;
     activeTorrentIdRef.current = null;
+    if (isNativeAvailable) {
+      void stopNativePlayer().catch(() => undefined);
+    }
     setStreamUrl(null);
+    setPlayerState("stopped");
+    setPlayerTime(0);
+    setPlayerDuration(0);
+    setPendingSeekTime(null);
+    setIsPlayerFullscreen(false);
+    setPlayerTracks([]);
     setSession(null);
-    setDownloadProgress(null);
     setSelectedFileIndex(0);
     setMetadataState("stopped");
     setErrorMessage(null);
   }
 
-  // Stops playback and tells the engine to stop pulling the torrent (pause), so
-  // it no longer downloads/seeds in the background. The torrent stays in the
-  // engine and remains visible in History for later cleanup or resume.
-  async function stopStreamingAndTorrent() {
-    const torrentId = activeTorrentIdRef.current ?? session?.torrentId;
-    const activeEngineBaseUrl = engineBaseUrl ?? undefined;
-    const controller = activeLoadAbortRef.current;
+  function stopActivePlayback() {
+    activeLoadAbortRef.current?.abort();
+    activeLoadAbortRef.current = null;
 
-    setIsStoppingTorrent(true);
-    try {
-      controller?.abort();
-      activeLoadAbortRef.current = null;
-      videoRef.current?.pause();
-      setStreamUrl(null);
-      setDownloadProgress(null);
-      setVideoError(null);
-      setErrorMessage(null);
-      setMetadataState(session ? "ready" : "stopped");
-
-      if (typeof torrentId === "number") {
-        await pauseTorrent(torrentId, activeEngineBaseUrl);
-      }
-    } catch (error) {
-      setVideoError(`Could not stop the torrent engine: ${getErrorMessage(error)}`);
-    } finally {
-      setIsStoppingTorrent(false);
+    if (isNativeAvailable) {
+      void stopNativePlayer().catch(() => undefined);
     }
+
+    videoRef.current?.pause();
+
+    if (document.fullscreenElement === playerPanelRef.current) {
+      void document.exitFullscreen().catch(() => undefined);
+    }
+
+    setStreamUrl(null);
+    setPlayerState("stopped");
+    setPlayerTime(0);
+    setPlayerDuration(0);
+    setPendingSeekTime(null);
+    setIsPlayerFullscreen(false);
+    setIsPlayerBuffering(false);
+    setPlayerTracks([]);
+    setDownloadProgress(null);
   }
 
   async function openHistory() {
+    stopActivePlayback();
     setShowHistory(true);
     await loadHistory();
   }
@@ -956,8 +1273,7 @@ function App() {
   }
 
   function returnToTitleSearch() {
-    activeLoadAbortRef.current?.abort();
-    activeLoadAbortRef.current = null;
+    stopActivePlayback();
     setSelectedCatalogTitle(null);
     setSelectedSourceResultId(null);
     setSourceResults([]);
@@ -965,8 +1281,6 @@ function App() {
     setSourceErrorMessage(null);
     setSourceSearchState("idle");
     setSession(null);
-    setStreamUrl(null);
-    setDownloadProgress(null);
     setSelectedFileIndex(0);
     setMetadataState("idle");
     setErrorMessage(null);
@@ -978,11 +1292,8 @@ function App() {
   }
 
   function returnToSources() {
-    activeLoadAbortRef.current?.abort();
-    activeLoadAbortRef.current = null;
+    stopActivePlayback();
     setSession(null);
-    setStreamUrl(null);
-    setDownloadProgress(null);
     setSelectedFileIndex(0);
     setSelectedSourceResultId(null);
     setMetadataState("idle");
@@ -1199,9 +1510,8 @@ function App() {
     setSourceErrors([]);
     setSourceErrorMessage(null);
     setSession(null);
-    setDownloadProgress(null);
     setSelectedFileIndex(0);
-    await pullMetadata(normalizedSource);
+    await startPlayback(normalizedSource);
   }
 
   async function submitSourceEntry() {
@@ -1411,6 +1721,162 @@ function App() {
     setSubtitleOffsetSeconds(0);
   }
 
+  function syncHtmlPlaybackState() {
+    const video = videoRef.current;
+
+    if (!video || isNativePlayback) {
+      return;
+    }
+
+    setPlayerTime(video.currentTime || 0);
+    setPlayerDuration(Number.isFinite(video.duration) ? video.duration : 0);
+    setPlayerState(video.paused ? "paused" : "playing");
+  }
+
+  async function toggleTransportPlayback() {
+    if (!streamUrl) {
+      return;
+    }
+
+    if (isNativePlayback) {
+      if (playerState === "playing") {
+        await pauseNativePlayer();
+        setPlayerState("paused");
+      } else {
+        await playNativePlayer();
+        setPlayerState("playing");
+      }
+      return;
+    }
+
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+
+    if (video.paused) {
+      await video.play();
+      setPlayerState("playing");
+    } else {
+      video.pause();
+      setPlayerState("paused");
+    }
+  }
+
+  async function seekPlayback(seconds: number) {
+    const nextSeconds = Math.max(0, hasKnownPlayerLength ? Math.min(seconds, playerLength) : seconds);
+
+    if (isNativePlayback) {
+      await seekNativePlayer(nextSeconds);
+    } else if (videoRef.current) {
+      videoRef.current.currentTime = nextSeconds;
+    }
+
+    setPlayerTime(nextSeconds);
+  }
+
+  async function commitSeekControl(seconds: number) {
+    if (!streamUrl) {
+      setPendingSeekTime(null);
+      return;
+    }
+
+    const nextSeconds = Math.max(0, hasKnownPlayerLength ? Math.min(seconds, playerLength) : seconds);
+    setPendingSeekTime(nextSeconds);
+
+    try {
+      await seekPlayback(nextSeconds);
+    } finally {
+      setPendingSeekTime(null);
+    }
+  }
+
+  async function changePlayerVolume(value: number) {
+    const nextVolume = Math.max(0, Math.min(100, value));
+    setPlayerVolume(nextVolume);
+
+    if (isNativePlayback) {
+      await setNativePlayerVolume(nextVolume);
+    } else if (videoRef.current) {
+      videoRef.current.volume = nextVolume / 100;
+    }
+  }
+
+  async function togglePlayerMuted() {
+    const nextMuted = !isPlayerMuted;
+    setIsPlayerMuted(nextMuted);
+
+    if (isNativePlayback) {
+      await setNativePlayerMuted(nextMuted);
+    } else if (videoRef.current) {
+      videoRef.current.muted = nextMuted;
+    }
+  }
+
+  async function changePlayerRate(value: number) {
+    setPlayerRate(value);
+
+    if (isNativePlayback) {
+      await setNativePlayerRate(value);
+    } else if (videoRef.current) {
+      videoRef.current.playbackRate = value;
+    }
+  }
+
+  function requestSurfaceResync() {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        setSurfaceSyncNonce((currentNonce) => currentNonce + 1);
+      });
+    });
+  }
+
+  async function togglePlayerFullscreen() {
+    const panel = playerPanelRef.current;
+
+    if (!panel) {
+      return;
+    }
+
+    if (isNativePlayback) {
+      if (document.fullscreenElement === panel) {
+        await document.exitFullscreen();
+        await setNativePlayerFullscreen(false);
+        isPlayerFullscreenRef.current = false;
+        setIsPlayerFullscreen(false);
+        requestSurfaceResync();
+        return;
+      }
+
+      await panel.requestFullscreen();
+      isPlayerFullscreenRef.current = true;
+      setIsPlayerFullscreen(true);
+      requestSurfaceResync();
+      return;
+    }
+
+    if (document.fullscreenElement === panel) {
+      await document.exitFullscreen();
+      setIsPlayerFullscreen(false);
+      requestSurfaceResync();
+      return;
+    }
+
+    await panel.requestFullscreen();
+    setIsPlayerFullscreen(true);
+    requestSurfaceResync();
+  }
+
+  async function chooseAudioTrack(trackId: number) {
+    setSelectedAudioTrackId(trackId);
+    await selectNativeAudioTrack(trackId);
+  }
+
+  async function chooseSubtitleTrack(trackId: number) {
+    setSelectedSubtitleTrackId(trackId);
+    await selectNativeSubtitleTrack(trackId);
+  }
+
   async function pullMetadata(sourceOverride?: string) {
     const normalizedInput = (sourceOverride ?? torrentInput).trim();
     let controller: AbortController | null = null;
@@ -1418,12 +1884,10 @@ function App() {
     activeTorrentIdRef.current = null;
     setStreamUrl(null);
     setErrorMessage(null);
-    setDownloadProgress(null);
 
     if (!normalizedInput || !isSupportedTorrentSource(normalizedInput)) {
       setMetadataState("error");
       setSession(null);
-      setDownloadProgress(null);
       setErrorMessage("Paste a valid magnet URI, torrent URL, or direct HTTP(S) torrent source.");
       return null;
     }
@@ -1471,7 +1935,6 @@ function App() {
       if (error instanceof DOMException && error.name === "AbortError") {
         if (controller && shouldShowStoppedLoadRequest(controller)) {
           setSession(null);
-          setDownloadProgress(null);
           setMetadataState("stopped");
           setErrorMessage(null);
         }
@@ -1479,7 +1942,6 @@ function App() {
       }
 
       setSession(null);
-      setDownloadProgress(null);
       setMetadataState("error");
       setErrorMessage(getErrorMessage(error));
       return null;
@@ -1504,20 +1966,19 @@ function App() {
     setTorrentInput(source);
     setSourceQuery(result.title);
     setSession(null);
-    setDownloadProgress(null);
     setSelectedFileIndex(0);
-    await pullMetadata(source);
+    await startPlayback(source);
   }
 
-  async function startPlayback() {
-    const normalizedInput = torrentInput.trim();
-    const activeSession = session ?? (await pullMetadata());
+  async function startPlayback(sourceOverride?: string) {
+    const normalizedInput = (sourceOverride ?? torrentInput).trim();
+    const activeSession = sourceOverride ? await pullMetadata(sourceOverride) : session ?? (await pullMetadata());
 
     if (!activeSession) {
       return;
     }
 
-    const fileToPlay = selectedFile ?? activeSession.files.find(isPlayable);
+    const fileToPlay = sourceOverride ? activeSession.files.find(isPlayable) : selectedFile ?? activeSession.files.find(isPlayable);
 
     if (!fileToPlay) {
       return;
@@ -1572,17 +2033,46 @@ function App() {
         throw new DOMException("Stopped current torrent load.", "AbortError");
       }
 
-      const nextUrl = getVideoStreamSrc(activeEngineBaseUrl, torrentId, fileToPlay.index);
+      const capabilities = await initializeNativePlayer();
+      setNativeCapabilities(capabilities);
+      const shouldUseNativePlayback = capabilities.available;
+      if (!capabilities.available) {
+        setVideoError(capabilities.reason ?? "Native mpv is unavailable, using HTML playback.");
+      }
+      const directStreamUrl = getStreamUrl(activeEngineBaseUrl, torrentId, fileToPlay.index);
+      const fallbackStreamUrl = getVideoStreamSrc(activeEngineBaseUrl, torrentId, fileToPlay.index);
+      const nextUrl = shouldUseNativePlayback ? directStreamUrl : fallbackStreamUrl;
 
       setSession({
         ...activeSession,
         torrentId,
         seenPeers
       });
-      setDownloadProgress(null);
       setVideoError(null);
       setStreamUrl(nextUrl);
       setMetadataState("streaming");
+      setPlayerState("loading");
+      setPlayerTime(0);
+      setPlayerDuration(0);
+
+      if (shouldUseNativePlayback) {
+        setPlaybackBackend("native");
+
+        try {
+          await loadNativePlayer(torrentId, fileToPlay.index, getFileName(fileToPlay), playerTime);
+          await setNativePlayerVolume(playerVolume);
+          await setNativePlayerMuted(isPlayerMuted);
+          await setNativePlayerRate(playerRate);
+          setPlayerState("playing");
+          return;
+        } catch (nativeError) {
+          setPlaybackBackend("html");
+          setStreamUrl(fallbackStreamUrl);
+          setVideoError(`Native player could not start, using HTML fallback: ${getErrorMessage(nativeError)}`);
+        }
+      } else {
+        setPlaybackBackend("html");
+      }
 
       window.setTimeout(() => {
         void videoRef.current?.play().catch((error: unknown) => {
@@ -1601,7 +2091,6 @@ function App() {
         if (controller && shouldShowStoppedLoadRequest(controller)) {
           setMetadataState("stopped");
           setErrorMessage(null);
-          setDownloadProgress(null);
         }
         return;
       }
@@ -1609,7 +2098,6 @@ function App() {
       setMetadataState("ready");
       setVideoError(getErrorMessage(error));
       setErrorMessage(null);
-      setDownloadProgress(null);
     } finally {
       if (controller) {
         clearLoadRequest(controller);
@@ -1618,24 +2106,8 @@ function App() {
     }
   }
 
-  const canPlay = (metadataState === "ready" || metadataState === "streaming") && Boolean(selectedFile);
-  const stateTitle =
-    metadataState === "streaming"
-      ? "Streaming"
-      : metadataState === "ready"
-        ? "Ready to play"
-        : metadataState === "fetching"
-          ? "Pulling data"
-          : metadataState === "starting"
-            ? "Starting stream"
-            : metadataState === "stopped"
-              ? "Stopped"
-              : metadataState === "error"
-                ? "Needs attention"
-                : "Needs source";
-
   return (
-    <main className={`player-app view-${viewMode}`}>
+    <main className={`player-app view-${viewMode}${isNativePlayback && streamUrl ? " native-playback-active" : ""}`}>
       <header className="topbar compact-topbar">
         <div>
           <p className="eyebrow">TorrentDock v1</p>
@@ -1890,9 +2362,32 @@ function App() {
           {renderSelectedTitleBar(true)}
         <section className="player-layout" aria-label="Torrent playback workspace">
         <div className="player-main">
-        <section className="player-panel" aria-label="Video player">
-          <div className={streamUrl ? "video-surface video-surface-active" : "video-surface"}>
-            {streamUrl ? (
+        <section
+          ref={playerPanelRef}
+          className={isNativePlayback && streamUrl ? "player-panel native-player-panel" : "player-panel"}
+          aria-label="Video player"
+        >
+          <div
+            ref={videoSurfaceRef}
+            className={[
+              "video-surface",
+              streamUrl ? "video-surface-active" : "",
+              isNativePlayback && streamUrl ? "native-video-surface" : ""
+            ].filter(Boolean).join(" ")}
+          >
+            {streamUrl && isNativePlayback ? (
+              <div className="native-video-window" aria-label="Native video surface">
+                {isPlayerBuffering ? (
+                  <div className="video-center native-video-overlay">
+                    <Loader2 className="spin" size={36} aria-hidden="true" />
+                    <div>
+                      <h2>Buffering from torrent pieces</h2>
+                      <p>mpv is waiting for rqbit to make the next range available.</p>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : streamUrl ? (
               <video
                 ref={videoRef}
                 src={streamUrl}
@@ -1901,6 +2396,17 @@ function App() {
                 style={subtitleStyle}
                 onPlay={() => {
                   setVideoError(null);
+                  setPlayerState("playing");
+                }}
+                onPause={() => {
+                  setPlayerState("paused");
+                }}
+                onLoadedMetadata={syncHtmlPlaybackState}
+                onTimeUpdate={syncHtmlPlaybackState}
+                onDurationChange={syncHtmlPlaybackState}
+                onVolumeChange={(event) => {
+                  setPlayerVolume(Math.round(event.currentTarget.volume * 100));
+                  setIsPlayerMuted(event.currentTarget.muted);
                 }}
                 onError={(event) => {
                   setVideoError(describeMediaError(event.currentTarget.error, selectedFile ? getFileName(selectedFile) : session?.name ?? ""));
@@ -1933,9 +2439,6 @@ function App() {
                 </div>
               </div>
             )}
-            <div className="video-badge">
-              {metadataState === "streaming" ? "Local HTTP stream" : metadataState === "ready" ? "Metadata ready" : "Engine required"}
-            </div>
             {videoError ? (
               <div className="video-error" role="alert">
                 <FileVideo size={28} aria-hidden="true" />
@@ -1944,70 +2447,181 @@ function App() {
             ) : null}
           </div>
 
-          <div className="player-controls">
+          <div
+            ref={playerToolbarRef}
+            className={`player-toolbar${isPlayerFullscreen && !playerControlsVisible ? " player-toolbar-hidden" : ""}`}
+            aria-label="Playback controls"
+            onPointerMove={() => setPlayerControlsVisible(true)}
+            onFocus={() => setPlayerControlsVisible(true)}
+          >
             <button
               type="button"
-              className={hasActivePlaybackLoad ? "play-button stop-button" : "play-button"}
-              disabled={isStoppingTorrent || (!hasActivePlaybackLoad && !canPlay)}
+              className="ghost-button transport-toggle"
+              disabled={!streamUrl}
               onClick={() => {
-                if (hasActivePlaybackLoad) {
-                  void stopStreamingAndTorrent();
-                  return;
-                }
-
-                void startPlayback();
+                void toggleTransportPlayback().catch((error: unknown) => setVideoError(getErrorMessage(error)));
               }}
-              title={hasActivePlaybackLoad ? "Stop the current torrent load and stream" : "Start playback"}
             >
-              {isStoppingTorrent ? (
-                <Loader2 className="spin" size={20} aria-hidden="true" />
-              ) : hasActivePlaybackLoad ? (
-                <Square size={20} aria-hidden="true" />
-              ) : (
-                <Play size={20} aria-hidden="true" />
-              )}
-              {isStoppingTorrent ? "Stopping" : hasActivePlaybackLoad ? "Stop" : "Play"}
+              {playerState === "playing" ? <CirclePause size={18} aria-hidden="true" /> : <Play size={18} aria-hidden="true" />}
+              {playerState === "playing" ? "Pause" : "Resume"}
             </button>
-            <div className="download-progress" aria-label="Download progress">
-              <div className="progress-labels">
-                <span>{progressLabel}</span>
-                <span>{downloadSpeedLabel}</span>
-              </div>
-              <div
-                className="progress-track"
-                role="progressbar"
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={Math.round(progressPercent)}
-                aria-label="Torrent download completion"
+
+            <div className="volume-menu">
+              <button
+                type="button"
+                className="ghost-button icon-control"
+                aria-label={isPlayerMuted ? "Unmute" : "Mute"}
+                disabled={!streamUrl}
+                onClick={() => {
+                  void togglePlayerMuted().catch((error: unknown) => setVideoError(getErrorMessage(error)));
+                }}
               >
-                <span style={{ width: `${progressPercent}%` }} />
-              </div>
-              <div className="progress-meta">
-                <span>{progressBytesLabel}</span>
-                <span>{downloadProgress ? `${downloadProgress.livePeers} live peers` : `${session?.seenPeers ?? 0} seen peers`}</span>
+                {isPlayerMuted ? <VolumeX size={18} aria-hidden="true" /> : <Volume2 size={18} aria-hidden="true" />}
+              </button>
+              <div className="volume-popover" role="group" aria-label="Volume">
+                <span>Volume</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={playerVolume}
+                  disabled={!streamUrl}
+                  aria-label="Volume"
+                  onChange={(event) => {
+                    void changePlayerVolume(Number(event.target.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
+                  }}
+                />
+                <strong>{playerVolume}%</strong>
               </div>
             </div>
+
+            <button
+              type="button"
+              className="ghost-button icon-control"
+              aria-label={isPlayerFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+              disabled={!streamUrl}
+              onClick={() => {
+                void togglePlayerFullscreen().catch((error: unknown) => setVideoError(getErrorMessage(error)));
+              }}
+            >
+              {isPlayerFullscreen ? <Minimize2 size={18} aria-hidden="true" /> : <Maximize2 size={18} aria-hidden="true" />}
+            </button>
+
+            <label className="seek-control toolbar-seek-control">
+              <span>
+                {formatPlaybackTime(displayedPlayerPosition)} / {hasKnownPlayerLength ? formatPlaybackTime(playerLength) : "--:--"}
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={playerSeekMax}
+                step={1}
+                value={Math.min(Math.round(displayedPlayerPosition), playerSeekMax)}
+                disabled={!streamUrl}
+                onChange={(event) => {
+                  setPendingSeekTime(Number(event.target.value));
+                }}
+                onPointerUp={(event) => {
+                  void commitSeekControl(Number(event.currentTarget.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
+                }}
+                onMouseUp={(event) => {
+                  void commitSeekControl(Number(event.currentTarget.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
+                }}
+                onTouchEnd={(event) => {
+                  void commitSeekControl(Number(event.currentTarget.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
+                }}
+                onKeyUp={(event) => {
+                  if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) {
+                    void commitSeekControl(Number(event.currentTarget.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
+                  }
+                }}
+                onBlur={(event) => {
+                  if (pendingSeekTime !== null) {
+                    void commitSeekControl(Number(event.currentTarget.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
+                  }
+                }}
+              />
+            </label>
+
+            <label className="toolbar-inline-control toolbar-rate-control">
+              <span>Speed</span>
+              <select
+                value={playerRate}
+                disabled={!streamUrl}
+                onChange={(event) => {
+                  void changePlayerRate(Number(event.target.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
+                }}
+              >
+                {playbackRates.map((rate) => (
+                  <option key={rate} value={rate}>
+                    {rate}x
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {isNativePlayback && audioTracks.length > 0 ? (
+              <label className="toolbar-inline-control toolbar-track-control">
+                <span>Audio</span>
+                <select
+                  value={selectedAudioTrackId ?? ""}
+                  onChange={(event) => {
+                    void chooseAudioTrack(Number(event.target.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
+                  }}
+                >
+                  {audioTracks.map((track) => (
+                    <option key={track.id} value={track.id}>
+                      {track.title}{track.language ? ` (${track.language})` : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+
+            {isNativePlayback && embeddedSubtitleTracks.length > 0 ? (
+              <label className="toolbar-inline-control toolbar-track-control">
+                <span>Subtitles</span>
+                <select
+                  value={selectedSubtitleTrackId ?? -1}
+                  onChange={(event) => {
+                    void chooseSubtitleTrack(Number(event.target.value)).catch((error: unknown) => setVideoError(getErrorMessage(error)));
+                  }}
+                >
+                  <option value={-1}>Off</option>
+                  {embeddedSubtitleTracks.map((track) => (
+                    <option key={track.id} value={track.id}>
+                      {track.title}{track.language ? ` (${track.language})` : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+
           </div>
         </section>
 
-          <div className="stats-grid" aria-label="Torrent health">
-            <div>
-              <RadioTower size={16} aria-hidden="true" />
-              <span>{session?.seenPeers ?? 0}</span>
-              <small>seen peers</small>
-            </div>
-            <div>
-              <Download size={16} aria-hidden="true" />
-              <span>{progressLabel}</span>
-              <small>downloaded</small>
-            </div>
-            <div>
-              <Upload size={16} aria-hidden="true" />
-              <span>{downloadSpeedLabel}</span>
-              <small>speed</small>
-            </div>
+        <div className="player-download-strip" aria-label="Torrent download progress">
+          <div className="download-strip-heading">
+            <span>{progressLabel}</span>
+            <span>{downloadSpeedLabel}</span>
           </div>
+          <div
+            className="download-strip-track"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(progressPercent)}
+            aria-label="Torrent download completion"
+          >
+            <span style={{ width: `${progressPercent}%` }} />
+          </div>
+          <div className="download-strip-meta">
+            <span>{progressBytesLabel}</span>
+            <span>{downloadProgress ? `${downloadProgress.livePeers} live peers` : `${session?.seenPeers ?? 0} seen peers`}</span>
+          </div>
+        </div>
+
         </div>
 
         <aside className="metadata-panel" aria-label="Metadata and files">

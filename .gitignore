@@ -5,11 +5,18 @@ node_modules/
 dist/
 target/
 src-tauri/target/
+tmp/
 
 # Tauri generated files
 src-tauri/gen/
 src-tauri/binaries/rqbit-*
 !src-tauri/binaries/.gitkeep
+src-tauri/mpv/*.dll
+src-tauri/mpv/*.dylib
+src-tauri/mpv/*.exe
+src-tauri/mpv/*.com
+src-tauri/mpv/*.pdb
+src-tauri/mpv/*.so*
 
 # Local environment
 .env
