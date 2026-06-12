@@ -18,11 +18,12 @@
     "electron:verify-rqbit-stream": "npm run build && electron . --rqbit-stream-probe",
     "electron:verify-media": "npm run build && npm run electron:verify-runtime && node scripts/verify-electron-media.mjs",
     "electron:build:win": "npm run electron:verify-media && electron-builder --win nsis portable --x64",
-    "electron:build:mac": "npm run electron:verify-media && electron-builder --mac dmg zip --universal",
+    "electron:build:mac": "npm run sidecar:prepare:mac && npm run electron:verify-media && electron-builder --mac dmg zip --universal",
     "electron:build:linux": "npm run electron:verify-media && electron-builder --linux AppImage deb --x64",
     "check:all": "npm run electron:verify-media && npm audit",
     "preview": "vite preview",
-    "sidecar:prepare": "node scripts/prepare-rqbit-sidecar.mjs"
+    "sidecar:prepare": "node scripts/prepare-rqbit-sidecar.mjs",
+    "sidecar:prepare:mac": "node scripts/prepare-rqbit-sidecar.mjs --target=universal-apple-darwin"
   },
   "dependencies": {
     "fflate": "^0.8.3",
@@ -53,27 +54,50 @@
       "electron-ffmpeg-runtime.json",
       "package.json"
     ],
-    "extraResources": [
-      {
-        "from": "resources/binaries",
-        "to": "binaries",
-        "filter": [
-          "rqbit-*"
-        ]
-      }
-    ],
     "win": {
       "icon": "assets/icons/icon.ico",
+      "extraResources": [
+        {
+          "from": "resources/binaries",
+          "to": "binaries",
+          "filter": [
+            "rqbit-*-windows-*.exe"
+          ]
+        }
+      ],
       "target": [
         "nsis",
         "portable"
       ]
     },
     "mac": {
-      "icon": "assets/icons/icon.icns"
+      "icon": "assets/icons/icon.icns",
+      "category": "public.app-category.video",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
+      "extraResources": [
+        {
+          "from": "resources/binaries",
+          "to": "binaries",
+          "filter": [
+            "rqbit-*-apple-darwin"
+          ]
+        }
+      ]
     },
     "linux": {
-      "icon": "assets/icons/icon.png"
+      "icon": "assets/icons/icon.png",
+      "extraResources": [
+        {
+          "from": "resources/binaries",
+          "to": "binaries",
+          "filter": [
+            "rqbit-*-linux-*"
+          ]
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,

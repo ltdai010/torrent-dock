@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -25,13 +25,18 @@ const hostTargetByPlatform = {
 };
 
 function getRequestedTargetTriple() {
-  const targetIndex = process.argv.indexOf("--target");
+  const targetIndex = process.argv.findIndex((arg) => arg === "--target" || arg === "-t");
   if (targetIndex !== -1) {
     return process.argv[targetIndex + 1];
   }
 
-  const targetArg = process.argv.find((arg) => arg.startsWith("--target="));
-  return targetArg?.slice("--target=".length);
+  const targetArg = process.argv.find((arg) => arg.startsWith("--target=") || arg.startsWith("-t="));
+  if (targetArg) {
+    return targetArg.slice(targetArg.indexOf("=") + 1);
+  }
+
+  const positionalTarget = process.argv.slice(2).find((arg) => !arg.startsWith("-"));
+  return process.env.npm_config_target || process.env.TORRENTDOCK_TARGET || positionalTarget;
 }
 
 function getHostTargetTriple() {
@@ -54,6 +59,20 @@ async function download(url, destination) {
   }
 
   await writeFile(destination, Buffer.from(await response.arrayBuffer()));
+}
+
+function getOutputNames(targetTriple) {
+  const extension = targetTriple.includes("windows") ? ".exe" : "";
+
+  if (targetTriple === "universal-apple-darwin") {
+    return [
+      "rqbit-universal-apple-darwin",
+      "rqbit-aarch64-apple-darwin",
+      "rqbit-x86_64-apple-darwin"
+    ];
+  }
+
+  return [`rqbit-${targetTriple}${extension}`];
 }
 
 const targetTriple = getRequestedTargetTriple() || getHostTargetTriple();
@@ -84,17 +103,25 @@ if (!asset?.browser_download_url) {
 
 await mkdir(binariesDir, { recursive: true });
 
-const extension = targetTriple.includes("windows") ? ".exe" : "";
-const destination = join(binariesDir, `rqbit-${targetTriple}${extension}`);
+const outputNames = getOutputNames(targetTriple);
+const destination = join(binariesDir, outputNames[0]);
 const temporaryDestination = `${destination}.download`;
 
 await rm(temporaryDestination, { force: true });
 await download(asset.browser_download_url, temporaryDestination);
 await rename(temporaryDestination, destination);
 
+for (const outputName of outputNames.slice(1)) {
+  await copyFile(destination, join(binariesDir, outputName));
+}
+
 if (!targetTriple.includes("windows")) {
-  await chmod(destination, 0o755);
+  for (const outputName of outputNames) {
+    await chmod(join(binariesDir, outputName), 0o755);
+  }
 }
 
 console.log(`Prepared rqbit sidecar ${release.tag_name} for ${targetTriple}`);
-console.log(destination);
+for (const outputName of outputNames) {
+  console.log(join(binariesDir, outputName));
+}

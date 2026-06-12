@@ -74,6 +74,7 @@ macOS builds must be produced on macOS:
 
 ```bash
 npm install
+npm run sidecar:prepare:mac
 make mac-check
 make mac-dev
 make mac-build
@@ -84,6 +85,8 @@ For a universal macOS app bundle:
 ```bash
 make mac-build-universal
 ```
+
+`electron:build:mac` prepares the universal rqbit sidecar automatically. For a distributable signed build, run on a machine with a valid Apple Developer ID certificate available to `electron-builder`; notarization credentials should be supplied through your release environment before publishing.
 
 Linux:
 

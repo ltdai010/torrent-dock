@@ -8,6 +8,16 @@
       "size": 3057152,
       "sha256": "80d1ff5d7689071edae78164eacf92e4924689936d8cd818340377318b0a5da6",
       "source": "npm:electron@42.4.0"
+    },
+    "darwin-arm64": {
+      "library": "node_modules/electron/dist/Electron.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/libffmpeg.dylib",
+      "source": "npm:electron@42.4.0",
+      "allowUnpinned": true
+    },
+    "darwin-x64": {
+      "library": "node_modules/electron/dist/Electron.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/libffmpeg.dylib",
+      "source": "npm:electron@42.4.0",
+      "allowUnpinned": true
     }
   },
   "verifiedFixtures": [
@@ -17,6 +27,8 @@
   ],
   "notes": [
     "This manifest records the Electron FFmpeg runtime that passed the local HTTP range playback probes.",
-    "If ffmpeg.dll is replaced with a custom build, update size, sha256, source, license, and rerun npm run electron:verify-media."
+    "Windows is pinned by size and SHA-256.",
+    "macOS entries are temporarily allowUnpinned so the first Mac validation can record the observed size and SHA-256.",
+    "If any FFmpeg runtime is replaced with a custom build, update size, sha256, source, license, and rerun npm run electron:verify-media."
   ]
 }
