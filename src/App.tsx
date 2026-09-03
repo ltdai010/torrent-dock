@@ -4,28 +4,16 @@ import videojs from "video.js";
 import type Player from "video.js/dist/types/player";
 import "video.js/dist/video-js.css";
 import {
-  AlertTriangle,
-  ArrowLeft,
   Captions,
-  ChevronDown,
-  ChevronRight,
   CirclePause,
-  Clapperboard,
-  Download,
-  FileVideo,
   History,
-  ListChecks,
   Loader2,
   Magnet,
-  RadioTower,
   Search,
-  ShieldCheck,
-  StepBack,
-  StepForward,
-  Trash2,
-  Upload
+  Settings,
 } from "lucide-react";
 import {
+  getLibraryTorrentDetails,
   getTorrentDownloadProgress,
   getStreamUrl,
   getVideoStreamSrc,
@@ -51,44 +39,43 @@ import { formatMovieSearchTitle, sanitizeMediaSearchTitle, searchMovieTitles, ty
 import { downloadSubSourceSubtitle, searchSubSourceSubtitles, type SubSourceSubtitleCandidate } from "./services/subsource";
 import { dedupeProviderResults, getProviderResultSource, searchTorrentSources } from "./services/torrentSources";
 import type { ProviderResult, ProviderSearchError } from "./domain/torrent";
-
-type MetadataState = "idle" | "fetching" | "ready" | "starting" | "streaming" | "stopped" | "error";
-type SourceSearchState = "idle" | "searching" | "ready" | "error";
-type CatalogSearchState = "idle" | "searching" | "ready" | "error";
-type OnlineSubtitleSearchState = "idle" | "searching" | "ready" | "loading" | "error";
-type OnlineSubtitleProvider = "subsource" | "opensubtitles";
-type OnlineSubtitleCandidate = {
-  provider: OnlineSubtitleProvider;
-  id: string;
-  name: string;
-  releaseName: string;
-  language: string;
-  format: string;
-  size?: number;
-  hi: boolean;
-  fps?: string | null;
-  isRawFile: boolean;
-  raw: SubSourceSubtitleCandidate | OpenSubtitlesCandidate;
-};
-
-type TorrentSession = {
-  infoHash: string;
-  name: string;
-  files: RqbitFile[];
-  seenPeers: number;
-  torrentId?: number;
-};
+import { AppHeaderSearch, AppTopBar } from "./components/AppControls";
+import { SettingsDialog } from "./components/SettingsDialog";
+import { Button } from "./components/ui";
+import { HistoryPage } from "./pages/HistoryPage";
+import { PlayerPage } from "./pages/PlayerPage";
+import { SearchPage } from "./pages/SearchPage";
+import type {
+  ActiveSubtitleTrack,
+  CatalogSearchState,
+  LanguageOption,
+  LocalTorrentMatch,
+  LoadedSubtitleTrack,
+  MetadataState,
+  OnlineSubtitleCandidate,
+  OnlineSubtitleProvider,
+  OnlineSubtitleSearchState,
+  ParsedSubtitleCue,
+  ParsedSubtitleTrack,
+  PersistedSubtitleTrack,
+  PlayerShortcutFeedback,
+  SourceSearchState,
+  TorrentSession
+} from "./domain/appTypes";
+import "./App.css";
 
 const playableExtensions = new Set([".avi", ".m4v", ".mkv", ".mov", ".mp4", ".ogg", ".ogm", ".ogv", ".webm"]);
 const subtitleExtensions = new Set([".srt", ".vtt"]);
 const subtitleShiftStepSeconds = 0.5;
+const playerSeekStepSeconds = 10;
 const playbackRates = [0.5, 0.75, 1, 1.25, 1.5, 2];
-const onlineSubtitleProviderStorageKey = "torrentdock.onlineSubtitleProvider";
 const subSourceApiKeyStorageKey = "torrentdock.subSourceApiKey";
 const subSourceLanguageStorageKey = "torrentdock.subSourceLanguage";
 const openSubtitlesUsernameStorageKey = "torrentdock.openSubtitlesOrgUsername";
 const openSubtitlesPasswordStorageKey = "torrentdock.openSubtitlesOrgPassword";
 const openSubtitlesLanguageStorageKey = "torrentdock.openSubtitlesLanguage";
+const subtitleTracksStorageKeyPrefix = "torrentdock.subtitleTracks.";
+const subtitleTextScaleStorageKey = "torrentdock.subtitleTextScale";
 const onlineSubtitleLanguageOptions = [
   { value: "EN", label: "English" },
   { value: "VI", label: "Vietnamese" },
@@ -121,6 +108,19 @@ const subSourceLanguageOptions = [
   { value: "thai", label: "Thai" },
   { value: "indonesian", label: "Indonesian" }
 ];
+const subtitleLanguageHints = [
+  { pattern: /(?:^|[._\-\s()[\]])(?:en|eng|english)(?:$|[._\-\s()[\]])/i, label: "English" },
+  { pattern: /(?:^|[._\-\s()[\]])(?:vi|vie|vietnamese|vietnam)(?:$|[._\-\s()[\]])/i, label: "Vietnamese" },
+  { pattern: /(?:^|[._\-\s()[\]])(?:es|spa|spanish)(?:$|[._\-\s()[\]])/i, label: "Spanish" },
+  { pattern: /(?:^|[._\-\s()[\]])(?:fr|fre|fra|french)(?:$|[._\-\s()[\]])/i, label: "French" },
+  { pattern: /(?:^|[._\-\s()[\]])(?:de|ger|deu|german)(?:$|[._\-\s()[\]])/i, label: "German" },
+  { pattern: /(?:^|[._\-\s()[\]])(?:pt|por|portuguese)(?:$|[._\-\s()[\]])/i, label: "Portuguese" },
+  { pattern: /(?:^|[._\-\s()[\]])(?:zh|chi|zho|chinese|chs|cht)(?:$|[._\-\s()[\]])/i, label: "Chinese" },
+  { pattern: /(?:^|[._\-\s()[\]])(?:ja|jpn|japanese)(?:$|[._\-\s()[\]])/i, label: "Japanese" },
+  { pattern: /(?:^|[._\-\s()[\]])(?:ko|kor|korean)(?:$|[._\-\s()[\]])/i, label: "Korean" },
+  { pattern: /(?:^|[._\-\s()[\]])(?:th|tha|thai)(?:$|[._\-\s()[\]])/i, label: "Thai" },
+  { pattern: /(?:^|[._\-\s()[\]])(?:id|ind|indonesian)(?:$|[._\-\s()[\]])/i, label: "Indonesian" }
+];
 
 function formatBytes(bytes: number) {
   if (bytes === 0) {
@@ -150,6 +150,190 @@ function getOnlineSubtitleProviderLabel(provider: OnlineSubtitleProvider) {
   return labels[provider];
 }
 
+function formatSubtitleLanguage(language?: string) {
+  if (!language) {
+    return null;
+  }
+
+  const normalizedLanguage = language.trim();
+  if (!normalizedLanguage) {
+    return null;
+  }
+
+  const knownLanguage = [...onlineSubtitleLanguageOptions, ...subSourceLanguageOptions].find(
+    (option) => option.value.toLowerCase() === normalizedLanguage.toLowerCase() || option.label.toLowerCase() === normalizedLanguage.toLowerCase()
+  );
+
+  if (knownLanguage) {
+    return knownLanguage.label;
+  }
+
+  return normalizedLanguage
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function inferSubtitleLanguageFromFileName(fileName: string) {
+  return subtitleLanguageHints.find((hint) => hint.pattern.test(fileName))?.label;
+}
+
+function normalizeLibraryMatchText(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/\.[a-z0-9]{2,5}$/i, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function getResultInfoHash(result: ProviderResult) {
+  if (result.infoHashV1) {
+    return result.infoHashV1.toLowerCase();
+  }
+
+  if (result.infoHashV2) {
+    return result.infoHashV2.toLowerCase();
+  }
+
+  const magnetHash = result.magnetUri?.match(/btih:([a-z0-9]+)/i)?.[1];
+  return magnetHash?.toLowerCase() ?? null;
+}
+
+function getSourceResultLocalMatch(
+  result: ProviderResult,
+  historyItems: LibraryTorrent[],
+  currentSession: TorrentSession | null
+): LocalTorrentMatch | null {
+  const resultInfoHash = getResultInfoHash(result);
+  const currentInfoHash = currentSession?.infoHash.toLowerCase();
+  const exactHashMatch = resultInfoHash
+    ? historyItems.find((item) => item.infoHash.toLowerCase() === resultInfoHash)
+    : undefined;
+
+  if (exactHashMatch) {
+    return {
+      id: exactHashMatch.id,
+      name: exactHashMatch.name,
+      outputFolder: exactHashMatch.outputFolder,
+      progressBytes: exactHashMatch.progressBytes,
+      totalBytes: exactHashMatch.totalBytes,
+      percent: exactHashMatch.percent,
+      finished: exactHashMatch.finished,
+      state: exactHashMatch.state,
+      isCurrent: currentInfoHash === resultInfoHash,
+      matchReason: "hash"
+    };
+  }
+
+  const normalizedResultTitle = normalizeLibraryMatchText(result.title);
+  if (normalizedResultTitle.length < 8) {
+    return null;
+  }
+
+  const titleMatch = historyItems.find((item) => {
+    const normalizedLocalTitle = normalizeLibraryMatchText(item.name);
+    return (
+      normalizedLocalTitle.length >= 8 &&
+      (normalizedLocalTitle === normalizedResultTitle ||
+        normalizedLocalTitle.includes(normalizedResultTitle) ||
+        normalizedResultTitle.includes(normalizedLocalTitle))
+    );
+  });
+
+  if (!titleMatch) {
+    return null;
+  }
+
+  return {
+    id: titleMatch.id,
+    name: titleMatch.name,
+    outputFolder: titleMatch.outputFolder,
+    progressBytes: titleMatch.progressBytes,
+    totalBytes: titleMatch.totalBytes,
+    percent: titleMatch.percent,
+    finished: titleMatch.finished,
+    state: titleMatch.state,
+    isCurrent: Boolean(currentInfoHash && titleMatch.infoHash.toLowerCase() === currentInfoHash),
+    matchReason: "title"
+  };
+}
+
+function getSubtitleTracksStorageKey(activeSession: TorrentSession | null, fileToPlay: RqbitFile | undefined) {
+  if (!activeSession || !fileToPlay) {
+    return null;
+  }
+
+  return `${subtitleTracksStorageKeyPrefix}${activeSession.infoHash}:${fileToPlay.index}:${fileToPlay.name}`;
+}
+
+function parsePersistedSubtitleTracks(value: string | null): LoadedSubtitleTrack[] {
+  if (!value) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.flatMap((track): LoadedSubtitleTrack[] => {
+      if (
+        typeof track !== "object" ||
+        track === null ||
+        !("sourceId" in track) ||
+        !("sourceLabel" in track) ||
+        !("fileName" in track) ||
+        !("rawText" in track)
+      ) {
+        return [];
+      }
+
+      const candidate = track as Partial<PersistedSubtitleTrack>;
+      if (
+        typeof candidate.sourceId !== "string" ||
+        typeof candidate.sourceLabel !== "string" ||
+        typeof candidate.fileName !== "string" ||
+        typeof candidate.rawText !== "string"
+      ) {
+        return [];
+      }
+
+      return [
+        {
+          id: createSubtitleTrackId(candidate.sourceId),
+          sourceId: candidate.sourceId,
+          sourceLabel: candidate.sourceLabel,
+          language: typeof candidate.language === "string" ? candidate.language : inferSubtitleLanguageFromFileName(candidate.fileName),
+          fileName: candidate.fileName,
+          rawText: candidate.rawText,
+          offsetSeconds: typeof candidate.offsetSeconds === "number" ? candidate.offsetSeconds : 0,
+          isVisible: typeof candidate.isVisible === "boolean" ? candidate.isVisible : true
+        }
+      ];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function serializeSubtitleTracks(tracks: LoadedSubtitleTrack[]) {
+  const persistedTracks: PersistedSubtitleTrack[] = tracks.map((track) => ({
+    sourceId: track.sourceId,
+    sourceLabel: track.sourceLabel,
+    language: track.language,
+    fileName: track.fileName,
+    rawText: track.rawText,
+    offsetSeconds: track.offsetSeconds,
+    isVisible: track.isVisible
+  }));
+
+  return JSON.stringify(persistedTracks);
+}
+
 function formatPercentage(value: number) {
   if (value >= 100) {
     return "100%";
@@ -172,6 +356,11 @@ function readStoredValue(key: string, fallback = "") {
   }
 
   return window.localStorage.getItem(key) ?? fallback;
+}
+
+function readStoredNumber(key: string, fallback: number) {
+  const value = Number(readStoredValue(key, String(fallback)));
+  return Number.isFinite(value) ? value : fallback;
 }
 
 function getFileName(file: RqbitFile) {
@@ -426,6 +615,92 @@ function buildSubtitleTrackText(rawSubtitleText: string, offsetSeconds: number) 
     .join("\n");
 }
 
+function decodeSubtitleEntities(value: string) {
+  return value
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;/g, "'");
+}
+
+function cleanSubtitleCueText(value: string) {
+  return decodeSubtitleEntities(value)
+    .replace(/<[^>]+>/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function parseSubtitleCueTiming(line: string) {
+  const [startValue, endValueWithSettings] = line.split("-->");
+  const endValue = endValueWithSettings?.trim().split(/\s+/)[0];
+
+  if (!startValue || !endValue) {
+    return null;
+  }
+
+  const start = parseSubtitleTimestamp(startValue);
+  const end = parseSubtitleTimestamp(endValue);
+
+  if (start === null || end === null || end <= start) {
+    return null;
+  }
+
+  return { start, end };
+}
+
+function parseSubtitleCues(rawSubtitleText: string, offsetSeconds: number) {
+  const trackText = buildSubtitleTrackText(rawSubtitleText, offsetSeconds);
+
+  if (!trackText.includes("-->")) {
+    return [];
+  }
+
+  return trackText
+    .split(/\n{2,}/)
+    .flatMap((block): ParsedSubtitleCue[] => {
+      const lines = block
+        .split("\n")
+        .map((line) => line.trimEnd())
+        .filter(Boolean);
+      const timingIndex = lines.findIndex((line) => line.includes("-->"));
+
+      if (timingIndex < 0) {
+        return [];
+      }
+
+      const timing = parseSubtitleCueTiming(lines[timingIndex]);
+      const text = cleanSubtitleCueText(lines.slice(timingIndex + 1).join("\n"));
+
+      if (!timing || !text) {
+        return [];
+      }
+
+      return [
+        {
+          start: timing.start,
+          end: timing.end,
+          text
+        }
+      ];
+    });
+}
+
+function createSubtitleTrackId(sourceId: string) {
+  return `${sourceId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+}
+
+function getTorrentSubtitleSourceId(file: RqbitFile) {
+  return `torrent:${file.index}`;
+}
+
+function isKeyboardShortcutTargetEditable(target: EventTarget | null) {
+  return target instanceof Element && Boolean(target.closest("input, textarea, select, button, a, [contenteditable]"));
+}
+
 function getErrorMessage(error: unknown) {
   if (error instanceof DOMException && error.name === "AbortError") {
     return "Stopped current torrent load.";
@@ -458,6 +733,7 @@ function App() {
   const activeLoadAbortRef = useRef<AbortController | null>(null);
   const activeTorrentIdRef = useRef<number | null>(null);
   const stoppedLoadControllersRef = useRef<WeakSet<AbortController>>(new WeakSet());
+  const shortcutFeedbackTimeoutRef = useRef<number | null>(null);
   const [torrentInput, setTorrentInput] = useState("");
   const [metadataState, setMetadataState] = useState<MetadataState>("idle");
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
@@ -483,16 +759,13 @@ function App() {
   const [catalogResults, setCatalogResults] = useState<MovieTitleCandidate[]>([]);
   const [catalogErrorMessage, setCatalogErrorMessage] = useState<string | null>(null);
   const [selectedCatalogTitle, setSelectedCatalogTitle] = useState<MovieTitleCandidate | null>(null);
-  const [subtitleRawText, setSubtitleRawText] = useState<string | null>(null);
-  const [subtitleFileName, setSubtitleFileName] = useState<string | null>(null);
-  const [subtitleTrackUrl, setSubtitleTrackUrl] = useState<string | null>(null);
-  const [subtitleOffsetSeconds, setSubtitleOffsetSeconds] = useState(0);
+  const [subtitleTracks, setSubtitleTracks] = useState<LoadedSubtitleTrack[]>([]);
+  const [loadedSubtitleTracksStorageKey, setLoadedSubtitleTracksStorageKey] = useState<string | null>(null);
   const [subtitleError, setSubtitleError] = useState<string | null>(null);
   const [subtitleLoadingFileIndex, setSubtitleLoadingFileIndex] = useState<number | null>(null);
-  const [onlineSubtitleProvider, setOnlineSubtitleProvider] = useState<OnlineSubtitleProvider>(() => {
-    const storedProvider = readStoredValue(onlineSubtitleProviderStorageKey, "subsource");
-    return storedProvider === "opensubtitles" || storedProvider === "subsource" ? storedProvider : "subsource";
-  });
+  const [videoJsOverlayRoot, setVideoJsOverlayRoot] = useState<HTMLElement | null>(null);
+  const [playerShortcutFeedback, setPlayerShortcutFeedback] = useState<PlayerShortcutFeedback | null>(null);
+  const [subtitleTextScale, setSubtitleTextScale] = useState(() => Math.min(1.7, Math.max(0.75, readStoredNumber(subtitleTextScaleStorageKey, 1))));
   const [subSourceApiKey, setSubSourceApiKey] = useState(() => readStoredValue(subSourceApiKeyStorageKey));
   const [subSourceLanguage, setSubSourceLanguage] = useState(() => readStoredValue(subSourceLanguageStorageKey, "english"));
   const [openSubtitlesUsername, setOpenSubtitlesUsername] = useState(() => readStoredValue(openSubtitlesUsernameStorageKey));
@@ -502,10 +775,8 @@ function App() {
   const [onlineSubtitleResults, setOnlineSubtitleResults] = useState<OnlineSubtitleCandidate[]>([]);
   const [onlineSubtitleError, setOnlineSubtitleError] = useState<string | null>(null);
   const [onlineSubtitleLoadingResultId, setOnlineSubtitleLoadingResultId] = useState<string | null>(null);
-  const [activeOnlineResultId, setActiveOnlineResultId] = useState<string | null>(null);
-  const [isSubtitleProviderExpanded, setIsSubtitleProviderExpanded] = useState(true);
-  const [isSubtitleListExpanded, setIsSubtitleListExpanded] = useState(true);
   const [showHistory, setShowHistory] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [historyItems, setHistoryItems] = useState<LibraryTorrent[]>([]);
   const [historyState, setHistoryState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -535,16 +806,122 @@ function App() {
       : "Waiting for stats";
   const downloadSpeedLabel = streamUrl ? (downloadProgress?.downloadSpeedLabel ?? "0 B/s") : "idle";
   const selectedCatalogSearchTitle = selectedCatalogTitle?.searchTitle;
-  const subtitleListCount = onlineSubtitleResults.length + subtitleFiles.length;
+  const subtitleTracksStorageKey = useMemo(() => getSubtitleTracksStorageKey(session, selectedFile), [session, selectedFile]);
+  const sourceResultLocalMatches = useMemo(
+    () =>
+      new Map(
+        sourceResults.flatMap((result) => {
+          const match = getSourceResultLocalMatch(result, historyItems, session);
+          return match ? [[result.id, match] as const] : [];
+        })
+      ),
+    [historyItems, session, sourceResults]
+  );
+  const activeSubtitleSourceIds = useMemo(() => new Set(subtitleTracks.map((track) => track.sourceId)), [subtitleTracks]);
+  const parsedSubtitleTracks = useMemo<ParsedSubtitleTrack[]>(
+    () =>
+      subtitleTracks.flatMap((track) => {
+        if (!track.isVisible) {
+          return [];
+        }
+
+        const cues = parseSubtitleCues(track.rawText, track.offsetSeconds);
+
+        if (cues.length === 0) {
+          return [];
+        }
+
+        return [
+          {
+            id: track.id,
+            sourceId: track.sourceId,
+            sourceLabel: track.sourceLabel,
+            language: track.language,
+            fileName: track.fileName,
+            offsetSeconds: track.offsetSeconds,
+            cues
+          }
+        ];
+      }),
+    [subtitleTracks]
+  );
+  const activeSubtitleTracks = useMemo<ActiveSubtitleTrack[]>(
+    () =>
+      parsedSubtitleTracks.flatMap((track, index) => {
+        const text = track.cues
+          .filter((cue) => playerTime >= cue.start && playerTime <= cue.end)
+          .map((cue) => cue.text)
+          .join("\n");
+
+        if (!text) {
+          return [];
+        }
+
+        return [
+          {
+            id: track.id,
+            fileName: track.fileName,
+            sourceLabel: track.sourceLabel,
+            text,
+            isPrimary: index === 0
+          }
+        ];
+      }),
+    [parsedSubtitleTracks, playerTime]
+  );
   const viewMode: "search" | "browse" | "player" = shouldShowPlayer
     ? "player"
     : selectedCatalogTitle
       ? "browse"
       : "search";
+  useEffect(() => {
+    if (!subtitleTracksStorageKey) {
+      setLoadedSubtitleTracksStorageKey(null);
+      setSubtitleTracks([]);
+      return;
+    }
+
+    setSubtitleTracks(parsePersistedSubtitleTracks(window.localStorage.getItem(subtitleTracksStorageKey)));
+    setLoadedSubtitleTracksStorageKey(subtitleTracksStorageKey);
+    setSubtitleError(null);
+  }, [subtitleTracksStorageKey]);
 
   useEffect(() => {
-    window.localStorage.setItem(onlineSubtitleProviderStorageKey, onlineSubtitleProvider);
-  }, [onlineSubtitleProvider]);
+    if (!subtitleTracksStorageKey || loadedSubtitleTracksStorageKey !== subtitleTracksStorageKey) {
+      return;
+    }
+
+    if (subtitleTracks.length === 0) {
+      window.localStorage.removeItem(subtitleTracksStorageKey);
+      return;
+    }
+
+    window.localStorage.setItem(subtitleTracksStorageKey, serializeSubtitleTracks(subtitleTracks));
+  }, [loadedSubtitleTracksStorageKey, subtitleTracks, subtitleTracksStorageKey]);
+
+  useEffect(() => {
+    setSubtitleTracks((currentTracks) => {
+      let changed = false;
+      const nextTracks = currentTracks.map((track) => {
+        if (track.language) {
+          return track;
+        }
+
+        const inferredLanguage = inferSubtitleLanguageFromFileName(track.fileName);
+        if (!inferredLanguage) {
+          return track;
+        }
+
+        changed = true;
+        return {
+          ...track,
+          language: inferredLanguage
+        };
+      });
+
+      return changed ? nextTracks : currentTracks;
+    });
+  }, [subtitleTracks]);
 
   useEffect(() => {
     const normalizedApiKey = subSourceApiKey.trim();
@@ -585,39 +962,20 @@ function App() {
   }, [openSubtitlesPassword]);
 
   useEffect(() => {
-    setIsSubtitleProviderExpanded(true);
-    setOnlineSubtitleSearchState("idle");
-    setOnlineSubtitleError(null);
-    setOnlineSubtitleResults([]);
-    setOnlineSubtitleLoadingResultId(null);
-  }, [onlineSubtitleProvider]);
+    window.localStorage.setItem(subtitleTextScaleStorageKey, String(subtitleTextScale));
+  }, [subtitleTextScale]);
 
   useEffect(() => {
-    if (!subtitleRawText) {
-      setSubtitleTrackUrl(null);
-      return undefined;
-    }
+    void loadHistory({ silent: true });
+  }, []);
 
-    const trackText = buildSubtitleTrackText(subtitleRawText, subtitleOffsetSeconds);
-
-    if (!trackText.includes("-->")) {
-      setSubtitleTrackUrl(null);
-      setSubtitleError("This subtitle file has no readable cues. Try a different result.");
-      return undefined;
-    }
-
-    const nextTrackUrl = URL.createObjectURL(
-      new Blob([trackText], {
-        type: "text/vtt"
-      })
-    );
-
-    setSubtitleTrackUrl(nextTrackUrl);
-
+  useEffect(() => {
     return () => {
-      URL.revokeObjectURL(nextTrackUrl);
+      if (shortcutFeedbackTimeoutRef.current !== null) {
+        window.clearTimeout(shortcutFeedbackTimeoutRef.current);
+      }
     };
-  }, [subtitleOffsetSeconds, subtitleRawText]);
+  }, []);
 
   useEffect(() => {
     const host = videoJsHostRef.current;
@@ -655,6 +1013,8 @@ function App() {
       sources: [source]
     });
     videoJsPlayerRef.current = player;
+    const playerElement = player.el();
+    setVideoJsOverlayRoot(playerElement instanceof HTMLElement ? playerElement : null);
 
     const syncPlayer = () => syncHtmlPlaybackState();
     const syncVolume = () => {
@@ -711,49 +1071,58 @@ function App() {
       if (videoJsPlayerRef.current === player) {
         videoJsPlayerRef.current = null;
       }
+      setVideoJsOverlayRoot(null);
       host.innerHTML = "";
     };
   }, [selectedFile, session?.name, streamUrl]);
 
   useEffect(() => {
-    if (!streamUrl || !subtitleTrackUrl) {
+    if (!streamUrl) {
       return undefined;
     }
 
-    const player = videoJsPlayerRef.current;
-
-    if (!player) {
-      return undefined;
-    }
-
-    const remoteTracks = player.remoteTextTracks();
-    for (let index = remoteTracks.length - 1; index >= 0; index -= 1) {
-      const track = (remoteTracks as unknown as { [index: number]: TextTrack })[index];
-      if (track) {
-        player.removeRemoteTextTrack(track);
+    const handleKeyboardShortcut = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        isKeyboardShortcutTargetEditable(event.target)
+      ) {
+        return;
       }
-    }
 
-    const trackElement = player.addRemoteTextTrack(
-      {
-        kind: "subtitles",
-        src: subtitleTrackUrl,
-        srclang: "en",
-        label: subtitleFileName ?? "Custom subtitles",
-        default: true
-      },
-      false
-    ) as unknown as HTMLTrackElement & { track: TextTrack };
-    const textTrack = trackElement.track;
-    const onLoad = () => showSubtitleTrack(textTrack);
-    trackElement.addEventListener("load", onLoad);
-    showSubtitleTrack(textTrack);
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        event.stopPropagation();
+        seekPlayerBy(-playerSeekStepSeconds);
+        return;
+      }
+
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        event.stopPropagation();
+        seekPlayerBy(playerSeekStepSeconds);
+        return;
+      }
+
+      if (event.code === "Space" || event.key === " " || event.key === "Spacebar") {
+        if (event.repeat) {
+          return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        togglePlayerPlayback();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyboardShortcut, { capture: true });
 
     return () => {
-      trackElement.removeEventListener("load", onLoad);
-      player.removeRemoteTextTrack(textTrack);
+      window.removeEventListener("keydown", handleKeyboardShortcut, { capture: true });
     };
-  }, [streamUrl, subtitleFileName, subtitleTrackUrl]);
+  }, [streamUrl]);
 
   useEffect(() => {
     if (!engineBaseUrl || typeof session?.torrentId !== "number" || !streamUrl) {
@@ -1001,6 +1370,7 @@ function App() {
 
   async function openHistory() {
     stopActivePlayback();
+    setShowSettings(false);
     setShowHistory(true);
     await loadHistory();
   }
@@ -1009,9 +1379,19 @@ function App() {
     setShowHistory(false);
   }
 
-  async function loadHistory() {
-    setHistoryState("loading");
-    setHistoryError(null);
+  function openSettings() {
+    setShowSettings(true);
+  }
+
+  function closeSettings() {
+    setShowSettings(false);
+  }
+
+  async function loadHistory(options: { silent?: boolean } = {}) {
+    if (!options.silent) {
+      setHistoryState("loading");
+      setHistoryError(null);
+    }
 
     try {
       const activeEngineBaseUrl = engineBaseUrl ?? (await ensureRqbitEngineEndpoint());
@@ -1019,11 +1399,66 @@ function App() {
       const items = await listLibraryTorrents(activeEngineBaseUrl);
       items.sort((a, b) => b.id - a.id);
       setHistoryItems(items);
-      setHistoryState("ready");
+      if (!options.silent) {
+        setHistoryState("ready");
+      }
     } catch (error) {
-      setHistoryItems([]);
-      setHistoryState("error");
+      if (!options.silent) {
+        setHistoryItems([]);
+        setHistoryState("error");
+        setHistoryError(getErrorMessage(error));
+      }
+    }
+  }
+
+  async function openHistoryItem(item: LibraryTorrent) {
+    setHistoryBusyId(item.id);
+    setHistoryError(null);
+
+    try {
+      const activeEngineBaseUrl = engineBaseUrl ?? (await ensureRqbitEngineEndpoint());
+      setEngineBaseUrl(activeEngineBaseUrl);
+
+      const details = await getLibraryTorrentDetails(item.id, activeEngineBaseUrl);
+      const files = details.files ?? [];
+      const playableHistoryFiles = files.filter(isPlayable);
+      const includedPlayableHistoryFiles = playableHistoryFiles.filter((file) => file.included);
+      const fileToPlay = includedPlayableHistoryFiles[0] ?? playableHistoryFiles[0];
+
+      if (!fileToPlay) {
+        setHistoryError("That history item has no browser-playable video file.");
+        return;
+      }
+
+      const nextSession: TorrentSession = {
+        infoHash: details.info_hash || item.infoHash,
+        name: details.name ?? item.name,
+        files,
+        seenPeers: 0,
+        torrentId: item.id
+      };
+      const selectedPlayableIndex = Math.max(0, playableHistoryFiles.findIndex((file) => file.index === fileToPlay.index));
+
+      setShowHistory(false);
+      setSelectedCatalogTitle(null);
+      setSelectedSourceResultId(null);
+      setSourceResults([]);
+      setSourceErrors([]);
+      setSourceErrorMessage(null);
+      setSourceSearchState("idle");
+      setSourceQuery(nextSession.name);
+      setTorrentInput("");
+      removeSubtitleFile();
+      setOnlineSubtitleResults([]);
+      setOnlineSubtitleError(null);
+      setOnlineSubtitleSearchState("idle");
+      setSession(nextSession);
+      setSelectedFileIndex(selectedPlayableIndex);
+      await startHistoryPlayback(nextSession, fileToPlay, activeEngineBaseUrl);
+    } catch (error) {
       setHistoryError(getErrorMessage(error));
+    } finally {
+      setHistoryBusyId(null);
     }
   }
 
@@ -1090,25 +1525,6 @@ function App() {
     }
   }
 
-  function returnToTitleSearch() {
-    stopActivePlayback();
-    setSelectedCatalogTitle(null);
-    setSelectedSourceResultId(null);
-    setSourceResults([]);
-    setSourceErrors([]);
-    setSourceErrorMessage(null);
-    setSourceSearchState("idle");
-    setSession(null);
-    setSelectedFileIndex(0);
-    setMetadataState("idle");
-    setErrorMessage(null);
-    setTorrentInput("");
-    removeSubtitleFile();
-    setOnlineSubtitleResults([]);
-    setOnlineSubtitleError(null);
-    setOnlineSubtitleSearchState("idle");
-  }
-
   function returnToSources() {
     stopActivePlayback();
     setSession(null);
@@ -1120,201 +1536,6 @@ function App() {
     setOnlineSubtitleResults([]);
     setOnlineSubtitleError(null);
     setOnlineSubtitleSearchState("idle");
-  }
-
-  function renderSourceResults() {
-    return (
-      <div className="source-results" aria-label="Discovered torrent sources">
-        {sourceResults.length > 0 ? (
-          sourceResults.map((result) => {
-            const resultSource = getProviderResultSource(result);
-            const isSelected = selectedSourceResultId === result.id;
-
-            return (
-              <article className={isSelected ? "source-result active" : "source-result"} key={result.id}>
-                <div className="source-result-main">
-                  <div className="source-result-title">
-                    <h3>{result.title}</h3>
-                    <span>{result.providerName}</span>
-                  </div>
-                  <div className="source-result-meta">
-                    <span>{result.category ?? "torrent"}</span>
-                    <span>{formatOptionalBytes(result.size)}</span>
-                    <span>{formatOptionalCount(result.seeders)} seeds</span>
-                    <span>{formatOptionalCount(result.leechers)} peers</span>
-                  </div>
-                </div>
-                <div className="source-result-actions">
-                  <button
-                    type="button"
-                    className="ghost-button source-load-button"
-                    disabled={!resultSource || isTorrentLoading}
-                    onClick={() => {
-                      void loadSourceResult(result);
-                    }}
-                  >
-                    {metadataState === "fetching" && isSelected ? (
-                      <Loader2 className="spin" size={16} aria-hidden="true" />
-                    ) : (
-                      <Magnet size={16} aria-hidden="true" />
-                    )}
-                    {isSelected && metadataState === "fetching" ? "Loading" : "Load"}
-                  </button>
-                </div>
-              </article>
-            );
-          })
-        ) : (
-          <div className="empty-files">No source results yet.</div>
-        )}
-      </div>
-    );
-  }
-
-  function renderSelectedTitleBar(inPlayer = false) {
-    const canGoBackToSources = inPlayer && sourceResults.length > 0;
-    const info = (
-      <>
-        <span className="selected-title-poster">
-          {selectedCatalogTitle?.imageUrl ? (
-            <img src={selectedCatalogTitle.imageUrl} alt="" loading="lazy" />
-          ) : (
-            <Clapperboard size={18} aria-hidden="true" />
-          )}
-        </span>
-        <div className="selected-title-text">
-          <strong>{selectedCatalogTitle?.title ?? session?.name ?? sourceQuery ?? "Selected source"}</strong>
-          <small>
-            {[selectedCatalogTitle?.year, selectedCatalogTitle?.kind, selectedCatalogTitle?.credits]
-              .filter(Boolean)
-              .join(" - ") || "Custom source"}
-          </small>
-        </div>
-      </>
-    );
-
-    return (
-      <section className="selected-title-bar" aria-label="Selected title">
-        {canGoBackToSources ? (
-          <button type="button" className="selected-title-info selected-title-trigger" onClick={returnToSources} aria-label="Back to torrent list">
-            {info}
-          </button>
-        ) : (
-          <div className="selected-title-info">{info}</div>
-        )}
-        <div className="selected-title-actions">
-          {canGoBackToSources ? (
-            <button type="button" className="ghost-button" onClick={returnToSources}>
-              <ArrowLeft size={16} aria-hidden="true" />
-              Back to torrents
-            </button>
-          ) : null}
-          <button type="button" className="ghost-button" onClick={returnToTitleSearch}>
-            <Search size={16} aria-hidden="true" />
-            New search
-          </button>
-        </div>
-      </section>
-    );
-  }
-
-  function renderHistoryPage() {
-    return (
-      <section className="history-page" aria-label="Download history">
-        <div className="history-header">
-          <div>
-            <h2>Download history</h2>
-            <p>Torrents the engine is tracking. Remove old downloads to free disk space.</p>
-          </div>
-          <div className="history-header-actions">
-            <button
-              type="button"
-              className="ghost-button danger"
-              onClick={() => void clearHistory()}
-              disabled={historyItems.length === 0 || isClearingHistory || historyBusyId !== null}
-              title="Delete every torrent in history and remove its downloaded files"
-            >
-              {isClearingHistory ? (
-                <Loader2 className="spin" size={16} aria-hidden="true" />
-              ) : (
-                <Trash2 size={16} aria-hidden="true" />
-              )}
-              {isClearingHistory ? "Deleting all" : "Delete all files"}
-            </button>
-            <button type="button" className="ghost-button" onClick={() => void loadHistory()} disabled={historyState === "loading"}>
-              {historyState === "loading" ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <RadioTower size={16} aria-hidden="true" />}
-              Refresh
-            </button>
-            <button type="button" className="ghost-button" onClick={closeHistory}>
-              <ArrowLeft size={16} aria-hidden="true" />
-              Back
-            </button>
-          </div>
-        </div>
-
-        {historyError ? <p className="history-error" role="alert">{historyError}</p> : null}
-
-        {historyState === "loading" && historyItems.length === 0 ? (
-          <div className="history-empty">
-            <Loader2 className="spin" size={28} aria-hidden="true" />
-            <p>Loading torrents from the engine…</p>
-          </div>
-        ) : historyItems.length === 0 ? (
-          <div className="history-empty">
-            <History size={28} aria-hidden="true" />
-            <p>No downloads yet. Torrents you stream will show up here.</p>
-          </div>
-        ) : (
-          <ul className="history-list">
-            {historyItems.map((item) => {
-              const isBusy = isClearingHistory || historyBusyId === item.id;
-              const statusLabel = item.finished
-                ? "Completed"
-                : item.state
-                  ? `${item.state} - ${formatPercentage(item.percent)}`
-                  : formatPercentage(item.percent);
-
-              return (
-                <li className="history-item" key={item.id}>
-                  <div className="history-item-main">
-                    <FileVideo size={20} aria-hidden="true" />
-                    <div className="history-item-text">
-                      <strong title={item.name}>{item.name}</strong>
-                      <small>
-                        {formatBytes(item.progressBytes)}
-                        {item.totalBytes > 0 ? ` / ${formatBytes(item.totalBytes)}` : ""} - {statusLabel}
-                      </small>
-                      {item.outputFolder ? <small className="history-item-path" title={item.outputFolder}>{item.outputFolder}</small> : null}
-                    </div>
-                  </div>
-                  <div className="history-item-actions">
-                    <button
-                      type="button"
-                      className="ghost-button"
-                      disabled={isBusy}
-                      onClick={() => void removeHistoryItem(item, false)}
-                      title="Remove from the engine but keep the downloaded files on disk"
-                    >
-                      Remove
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost-button danger"
-                      disabled={isBusy}
-                      onClick={() => void removeHistoryItem(item, true)}
-                      title="Remove from the engine and delete the downloaded files"
-                    >
-                      {isBusy ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Trash2 size={16} aria-hidden="true" />}
-                      Delete files
-                    </button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
-    );
   }
 
   async function loadDirectSource(source: string) {
@@ -1353,25 +1574,40 @@ function App() {
   }
 
   async function loadSubtitleFile(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
+    const files = Array.from(event.target.files ?? []);
     event.target.value = "";
 
-    if (!file) {
+    if (files.length === 0) {
       return;
     }
 
-    const normalizedName = file.name.toLowerCase();
+    const skippedFiles: string[] = [];
 
-    if (!normalizedName.endsWith(".srt") && !normalizedName.endsWith(".vtt")) {
-      setSubtitleError("Choose a .srt or .vtt subtitle file.");
-      return;
+    for (const file of files) {
+      const normalizedName = file.name.toLowerCase();
+
+      if (!normalizedName.endsWith(".srt") && !normalizedName.endsWith(".vtt")) {
+        skippedFiles.push(file.name);
+        continue;
+      }
+
+      try {
+        const text = await file.text();
+        const wasAdded = addSubtitleTrack(text, file.name, {
+          sourceId: `local:${file.name}:${file.size}:${file.lastModified}`,
+          sourceLabel: "Uploaded"
+        });
+
+        if (!wasAdded) {
+          skippedFiles.push(file.name);
+        }
+      } catch {
+        skippedFiles.push(file.name);
+      }
     }
 
-    try {
-      const text = await file.text();
-      loadSubtitleText(text, file.name);
-    } catch {
-      setSubtitleError("Could not read that subtitle file.");
+    if (skippedFiles.length > 0) {
+      setSubtitleError(`Skipped ${skippedFiles.length} subtitle file${skippedFiles.length === 1 ? "" : "s"} that could not be loaded.`);
     }
   }
 
@@ -1385,7 +1621,10 @@ function App() {
       setSubtitleLoadingFileIndex(file.index);
       setSubtitleError(null);
       const subtitleText = await readTorrentFileAsText(engineBaseUrl, session.torrentId, file.index);
-      loadSubtitleText(subtitleText, getFileName(file));
+      addSubtitleTrack(subtitleText, getFileName(file), {
+        sourceId: getTorrentSubtitleSourceId(file),
+        sourceLabel: "Torrent file"
+      });
     } catch (error) {
       setSubtitleError(error instanceof Error ? error.message : "Could not load that subtitle file from the torrent.");
     } finally {
@@ -1394,65 +1633,85 @@ function App() {
   }
 
   async function findOnlineSubtitles() {
-    const selectedProvider = onlineSubtitleProvider;
-
-    if (selectedProvider === "subsource" && !subSourceApiKey.trim()) {
-      setIsSubtitleProviderExpanded(true);
-      setOnlineSubtitleSearchState("error");
-      setOnlineSubtitleError("Add a SubSource API key first.");
-      return;
-    }
-
-    if (selectedProvider === "opensubtitles" && (!openSubtitlesUsername.trim() || !openSubtitlesPassword)) {
-      setIsSubtitleProviderExpanded(true);
-      setOnlineSubtitleSearchState("error");
-      setOnlineSubtitleError("Add your OpenSubtitles.org username and password first.");
-      return;
-    }
-
     if (!session && !selectedFile) {
       setOnlineSubtitleSearchState("error");
       setOnlineSubtitleError("Load torrent metadata before searching subtitles.");
       return;
     }
 
+    const configuredProviders: Array<{
+      provider: OnlineSubtitleProvider;
+      label: string;
+      search: () => Promise<OnlineSubtitleCandidate[]>;
+    }> = [];
+    const subtitleFilmName = selectedCatalogSearchTitle || sanitizeMediaSearchTitle(session?.name);
+    const subtitleFileQuery = sanitizeMediaSearchTitle(selectedFile ? getFileName(selectedFile) : undefined);
+
+    if (subSourceApiKey.trim()) {
+      configuredProviders.push({
+        provider: "subsource",
+        label: "SubSource",
+        search: async () =>
+          (await searchSubSourceSubtitles({
+            apiKey: subSourceApiKey.trim(),
+            filmName: subtitleFilmName,
+            fileName: subtitleFileQuery,
+            languages: subSourceLanguage
+          })).map(toOnlineSubtitleCandidate("subsource"))
+      });
+    }
+
+    if (openSubtitlesUsername.trim() && openSubtitlesPassword) {
+      configuredProviders.push({
+        provider: "opensubtitles",
+        label: "OpenSubtitles.org",
+        search: async () =>
+          (await searchOpenSubtitles({
+            username: openSubtitlesUsername,
+            password: openSubtitlesPassword,
+            filmName: subtitleFilmName,
+            query: subtitleFileQuery,
+            imdbId: selectedCatalogTitle?.id,
+            languages: openSubtitlesLanguage
+          })).map(toOnlineSubtitleCandidate("opensubtitles"))
+      });
+    }
+
+    if (configuredProviders.length === 0) {
+      setOnlineSubtitleSearchState("error");
+      setOnlineSubtitleError("Configure at least one subtitle provider in Settings.");
+      return;
+    }
+
     try {
-      setIsSubtitleProviderExpanded(true);
       setOnlineSubtitleSearchState("searching");
       setOnlineSubtitleError(null);
       setOnlineSubtitleResults([]);
-      const subtitleFilmName = selectedCatalogSearchTitle || sanitizeMediaSearchTitle(session?.name);
-      const subtitleFileQuery = sanitizeMediaSearchTitle(selectedFile ? getFileName(selectedFile) : undefined);
+      const settledResults = await Promise.allSettled(configuredProviders.map((provider) => provider.search()));
+      const results = settledResults.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
+      const failedProviderMessages = settledResults.flatMap((result, index) =>
+        result.status === "rejected"
+          ? [`${configuredProviders[index].label}: ${result.reason instanceof Error ? result.reason.message : "search failed"}`]
+          : []
+      );
 
-      const results =
-        selectedProvider === "subsource"
-          ? (await searchSubSourceSubtitles({
-              apiKey: subSourceApiKey.trim(),
-              filmName: subtitleFilmName,
-              fileName: subtitleFileQuery,
-              languages: subSourceLanguage
-            })).map(toOnlineSubtitleCandidate("subsource"))
-          : (await searchOpenSubtitles({
-              username: openSubtitlesUsername,
-              password: openSubtitlesPassword,
-              filmName: subtitleFilmName,
-              query: subtitleFileQuery,
-              imdbId: selectedCatalogTitle?.id,
-              languages: openSubtitlesLanguage
-            })).map(toOnlineSubtitleCandidate("opensubtitles"));
       setOnlineSubtitleResults(results);
 
       if (results.length === 0) {
         setOnlineSubtitleSearchState("error");
-        setOnlineSubtitleError(`No ${getOnlineSubtitleProviderLabel(selectedProvider)} subtitles matched this file.`);
+        setOnlineSubtitleError(
+          failedProviderMessages.length > 0
+            ? failedProviderMessages.join(" ")
+            : "No configured subtitle provider matched this file."
+        );
         return;
       }
 
+      if (failedProviderMessages.length > 0) {
+        setOnlineSubtitleError(`Partial subtitle provider errors: ${failedProviderMessages.join(" ")}`);
+      }
       setOnlineSubtitleSearchState("ready");
-      setIsSubtitleProviderExpanded(false);
-      setIsSubtitleListExpanded(true);
     } catch (error) {
-      setIsSubtitleProviderExpanded(true);
       setOnlineSubtitleResults([]);
       setOnlineSubtitleSearchState("error");
       setOnlineSubtitleError(error instanceof Error ? error.message : "Could not search online subtitles.");
@@ -1479,17 +1738,34 @@ function App() {
 
       if (candidate.provider === "subsource") {
         const response = await downloadSubSourceSubtitle(candidate.raw as SubSourceSubtitleCandidate, subSourceApiKey.trim());
-        loadSubtitleText(response.text, response.fileName ?? candidate.name);
+        if (
+          !addSubtitleTrack(response.text, response.fileName ?? candidate.name, {
+            sourceId: candidate.id,
+            sourceLabel: getOnlineSubtitleProviderLabel(candidate.provider),
+            language: candidate.language
+          })
+        ) {
+          setOnlineSubtitleSearchState("error");
+          return;
+        }
       } else {
         const response = await downloadOpenSubtitlesSubtitle(candidate.raw as OpenSubtitlesCandidate, {
           username: openSubtitlesUsername,
           password: openSubtitlesPassword
         });
 
-        loadSubtitleText(response.text, response.fileName);
+        if (
+          !addSubtitleTrack(response.text, response.fileName, {
+            sourceId: candidate.id,
+            sourceLabel: getOnlineSubtitleProviderLabel(candidate.provider),
+            language: candidate.language
+          })
+        ) {
+          setOnlineSubtitleSearchState("error");
+          return;
+        }
       }
 
-      setActiveOnlineResultId(candidate.id);
       setOnlineSubtitleSearchState("ready");
     } catch (error) {
       setOnlineSubtitleSearchState("error");
@@ -1515,34 +1791,109 @@ function App() {
     });
   }
 
-  function loadSubtitleText(text: string, fileName: string) {
-    setSubtitleRawText(text);
-    setSubtitleFileName(fileName);
-    setSubtitleOffsetSeconds(0);
-    setSubtitleError(null);
-    setActiveOnlineResultId(null);
-  }
+  function addSubtitleTrack(text: string, fileName: string, source: { sourceId: string; sourceLabel: string; language?: string }) {
+    const cues = parseSubtitleCues(text, 0);
 
-  function showSubtitleTrack(track: TextTrack) {
-    track.mode = "showing";
+    if (cues.length === 0) {
+      setSubtitleError(`${fileName} has no readable cues. Try a different result.`);
+      return false;
+    }
+
+    setSubtitleTracks((currentTracks) => {
+      const existingTrack = currentTracks.find((track) => track.sourceId === source.sourceId);
+      const nextTrack = {
+        id: existingTrack?.id ?? createSubtitleTrackId(source.sourceId),
+        sourceId: source.sourceId,
+        sourceLabel: source.sourceLabel,
+        language: source.language ?? inferSubtitleLanguageFromFileName(fileName),
+        fileName,
+        rawText: text,
+        offsetSeconds: existingTrack?.offsetSeconds ?? 0,
+        isVisible: existingTrack?.isVisible ?? true
+      };
+
+      return [...currentTracks.filter((track) => track.sourceId !== source.sourceId), nextTrack];
+    });
+    setSubtitleError(null);
+    return true;
   }
 
   function removeSubtitleFile() {
-    setSubtitleRawText(null);
-    setSubtitleFileName(null);
-    setSubtitleTrackUrl(null);
-    setSubtitleOffsetSeconds(0);
+    setSubtitleTracks([]);
     setSubtitleError(null);
     setSubtitleLoadingFileIndex(null);
-    setActiveOnlineResultId(null);
   }
 
-  function shiftSubtitle(deltaSeconds: number) {
-    setSubtitleOffsetSeconds((currentOffset) => Number((currentOffset + deltaSeconds).toFixed(1)));
+  function removeSubtitleTrack(trackId: string) {
+    const nextTracks = subtitleTracks.filter((track) => track.id !== trackId);
+    setSubtitleTracks(nextTracks);
+    setSubtitleError(null);
   }
 
-  function resetSubtitleShift() {
-    setSubtitleOffsetSeconds(0);
+  function makeSubtitleTrackPrimary(trackId: string) {
+    setSubtitleTracks((currentTracks) => {
+      const selectedTrack = currentTracks.find((track) => track.id === trackId);
+
+      if (!selectedTrack) {
+        return currentTracks;
+      }
+
+      return [selectedTrack, ...currentTracks.filter((track) => track.id !== trackId)];
+    });
+  }
+
+  function toggleSubtitleTrackVisibility(trackId: string) {
+    setSubtitleTracks((currentTracks) =>
+      currentTracks.map((track) =>
+        track.id === trackId
+          ? {
+              ...track,
+              isVisible: !track.isVisible
+            }
+          : track
+      )
+    );
+  }
+
+  function shiftSubtitleTrack(trackId: string, deltaSeconds: number) {
+    setSubtitleTracks((currentTracks) =>
+      currentTracks.map((track) =>
+        track.id === trackId
+          ? {
+              ...track,
+              offsetSeconds: Number((track.offsetSeconds + deltaSeconds).toFixed(1))
+            }
+          : track
+      )
+    );
+  }
+
+  function resetSubtitleTrackShift(trackId: string) {
+    setSubtitleTracks((currentTracks) =>
+      currentTracks.map((track) =>
+        track.id === trackId
+          ? {
+              ...track,
+              offsetSeconds: 0
+            }
+          : track
+      )
+    );
+  }
+
+  function showPlayerShortcutFeedback(label: string) {
+    if (shortcutFeedbackTimeoutRef.current !== null) {
+      window.clearTimeout(shortcutFeedbackTimeoutRef.current);
+    }
+
+    setPlayerShortcutFeedback({
+      id: Date.now(),
+      label
+    });
+    shortcutFeedbackTimeoutRef.current = window.setTimeout(() => {
+      setPlayerShortcutFeedback(null);
+      shortcutFeedbackTimeoutRef.current = null;
+    }, 650);
   }
 
   function syncHtmlPlaybackState() {
@@ -1554,6 +1905,56 @@ function App() {
       setPlayerDuration(typeof duration === "number" && Number.isFinite(duration) ? duration : 0);
       setPlayerState(videoJsPlayer.paused() ? "paused" : "playing");
     }
+  }
+
+  function seekPlayerBy(deltaSeconds: number) {
+    const videoJsPlayer = videoJsPlayerRef.current;
+
+    if (!videoJsPlayer) {
+      return;
+    }
+
+    const currentTime = videoJsPlayer.currentTime();
+    const duration = videoJsPlayer.duration();
+
+    if (typeof currentTime !== "number" || !Number.isFinite(currentTime)) {
+      return;
+    }
+
+    const upperBound = typeof duration === "number" && Number.isFinite(duration) && duration > 0 ? duration : Number.POSITIVE_INFINITY;
+    const nextTime = Math.min(Math.max(0, currentTime + deltaSeconds), upperBound);
+    videoJsPlayer.currentTime(nextTime);
+    setPlayerTime(nextTime);
+    showPlayerShortcutFeedback(deltaSeconds > 0 ? `+${playerSeekStepSeconds}s` : `-${playerSeekStepSeconds}s`);
+  }
+
+  function togglePlayerPlayback() {
+    const videoJsPlayer = videoJsPlayerRef.current;
+
+    if (!videoJsPlayer) {
+      return;
+    }
+
+    if (!videoJsPlayer.paused()) {
+      videoJsPlayer.pause();
+      syncHtmlPlaybackState();
+      showPlayerShortcutFeedback("Pause");
+      return;
+    }
+
+    showPlayerShortcutFeedback("Play");
+    const playResult = videoJsPlayer.play();
+    if (playResult) {
+      void playResult.catch((error: unknown) => {
+        if (error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "AbortError")) {
+          return;
+        }
+
+        setVideoError(getErrorMessage(error));
+      });
+    }
+
+    syncHtmlPlaybackState();
   }
 
   async function pullMetadata(sourceOverride?: string) {
@@ -1647,6 +2048,62 @@ function App() {
     setSession(null);
     setSelectedFileIndex(0);
     await startPlayback(source);
+  }
+
+  async function startHistoryPlayback(activeSession: TorrentSession, fileToPlay: RqbitFile, activeEngineBaseUrl?: string) {
+    const torrentId = activeSession.torrentId;
+
+    if (typeof torrentId !== "number") {
+      setVideoError("That history item is missing its torrent id.");
+      return;
+    }
+
+    const playbackEngineBaseUrl = activeEngineBaseUrl ?? engineBaseUrl ?? (await ensureRqbitEngineEndpoint());
+    let controller: AbortController | null = null;
+
+    try {
+      controller = beginLoadRequest();
+      setMetadataState("starting");
+      setErrorMessage(null);
+      setVideoError(null);
+      setStreamUrl(null);
+      setEngineBaseUrl(playbackEngineBaseUrl);
+
+      activeTorrentIdRef.current = torrentId;
+      await resumeTorrent(torrentId, playbackEngineBaseUrl, { signal: controller.signal });
+
+      if (controller.signal.aborted) {
+        throw new DOMException("Stopped current torrent load.", "AbortError");
+      }
+
+      const nextUrl = getVideoStreamSrc(playbackEngineBaseUrl, torrentId, fileToPlay.index);
+
+      setSession(activeSession);
+      setVideoError(null);
+      setStreamUrl(nextUrl);
+      setMetadataState("streaming");
+      setPlayerState("loading");
+      setPlayerTime(0);
+      setPlayerDuration(0);
+      setDownloadProgress(null);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        if (controller && shouldShowStoppedLoadRequest(controller)) {
+          setMetadataState("stopped");
+          setErrorMessage(null);
+        }
+        return;
+      }
+
+      setMetadataState("ready");
+      setVideoError(getErrorMessage(error));
+      setErrorMessage(null);
+    } finally {
+      if (controller) {
+        clearLoadRequest(controller);
+        stoppedLoadControllersRef.current.delete(controller);
+      }
+    }
   }
 
   async function startPlayback(sourceOverride?: string) {
@@ -1749,15 +2206,60 @@ function App() {
 
   return (
     <main className={`player-app view-${viewMode}`}>
-      <header className="topbar compact-topbar">
-        <div>
-          <p className="eyebrow">TorrentDock v1</p>
-          <h1>Search or paste a magnet.</h1>
-        </div>
-        <div className="topbar-actions">
-          <button
+      <AppTopBar
+        title="TorrentDock"
+        search={
+          <AppHeaderSearch
+            id="source-query"
+            label="Search title or paste magnet"
+            value={sourceQuery}
+            onChange={(value) => {
+              setSourceQuery(value);
+              setSelectedSourceResultId(null);
+              setSelectedCatalogTitle(null);
+            }}
+            onPaste={catchPastedSource}
+            onSubmit={() => void submitSourceEntry()}
+            disabled={isTorrentLoading || sourceSearchState === "searching" || catalogSearchState === "searching" || normalizedEntry.length < 2}
+            icon={
+              isTorrentLoading || sourceSearchState === "searching" || catalogSearchState === "searching" ? (
+                <Loader2 className="spin" size={17} aria-hidden="true" />
+              ) : entryIsTorrentSource ? (
+                <Magnet size={17} aria-hidden="true" />
+              ) : (
+                <Search size={17} aria-hidden="true" />
+              )
+            }
+            actionLabel={isTorrentLoading ? "Loading" : sourceSearchState === "searching" ? "Finding" : catalogSearchState === "searching" ? "Finding" : entryIsTorrentSource ? "Load" : "Search"}
+            secondaryAction={isTorrentLoading ? (
+              <Button type="button" color="red" variant="surface" onClick={stopCurrentLoad}>
+                <CirclePause size={17} aria-hidden="true" />
+                Stop
+              </Button>
+            ) : null}
+          />
+        }
+        actions={
+          <>
+          <Button
             type="button"
-            className={showHistory ? "ghost-button history-toggle active" : "ghost-button history-toggle"}
+            variant={showSettings ? "soft" : "surface"}
+            color="gray"
+            onClick={() => {
+              if (showSettings) {
+                closeSettings();
+              } else {
+                openSettings();
+              }
+            }}
+          >
+            <Settings size={16} aria-hidden="true" />
+            Settings
+          </Button>
+          <Button
+            type="button"
+            variant={showHistory ? "soft" : "surface"}
+            color="gray"
             onClick={() => {
               if (showHistory) {
                 closeHistory();
@@ -1768,552 +2270,131 @@ function App() {
           >
             <History size={16} aria-hidden="true" />
             History
-          </button>
-          <div className="safety-chip">
-            <ShieldCheck size={18} aria-hidden="true" />
-            Legal sources only
-          </div>
-        </div>
-      </header>
+          </Button>
+          </>
+        }
+      />
 
-      {showHistory ? renderHistoryPage() : null}
-
-      {!showHistory && viewMode === "search" ? (
-        <>
-      <section className="command-panel" aria-labelledby="source-entry-title">
-        <form
-          className="command-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void submitSourceEntry();
-          }}
-        >
-          <label htmlFor="source-query" id="source-entry-title">
-            Search title or paste magnet
-          </label>
-          <div className="command-row">
-            <input
-              id="source-query"
-              value={sourceQuery}
-              onChange={(event) => {
-                setSourceQuery(event.target.value);
-                setSelectedSourceResultId(null);
-                setSelectedCatalogTitle(null);
-              }}
-              onPaste={catchPastedSource}
-              spellCheck={false}
-              autoComplete="off"
-            />
-            <div className="command-actions">
-              <button type="submit" disabled={isTorrentLoading || sourceSearchState === "searching" || catalogSearchState === "searching" || normalizedEntry.length < 2}>
-                {isTorrentLoading || sourceSearchState === "searching" || catalogSearchState === "searching" ? (
-                  <Loader2 className="spin" size={18} aria-hidden="true" />
-                ) : entryIsTorrentSource ? (
-                  <Magnet size={18} aria-hidden="true" />
-                ) : (
-                  <Search size={18} aria-hidden="true" />
-                )}
-                {isTorrentLoading ? "Loading" : sourceSearchState === "searching" ? "Finding sources" : catalogSearchState === "searching" ? "Finding titles" : entryIsTorrentSource ? "Load" : "Search"}
-              </button>
-              {isTorrentLoading ? (
-                <button type="button" className="stop-button" onClick={stopCurrentLoad}>
-                  <CirclePause size={18} aria-hidden="true" />
-                  Stop
-                </button>
-              ) : null}
-            </div>
-          </div>
-          <p className="helper">Search a title, then choose a match.</p>
-        </form>
-      </section>
-
-      {shouldShowCatalogStatus ? (
-        <section className="discovery-panel results-panel" aria-labelledby="catalog-results-title">
-          <div className={`source-status source-status-${catalogSearchState}`} aria-live="polite">
-            {catalogSearchState === "searching" ? (
-              <Loader2 className="spin" size={18} aria-hidden="true" />
-            ) : catalogSearchState === "ready" ? (
-              <Clapperboard size={18} aria-hidden="true" />
-            ) : (
-              <AlertTriangle size={18} aria-hidden="true" />
-            )}
-            <div>
-              <h3>{catalogSearchState === "ready" ? "Title matches" : catalogSearchState === "searching" ? "Finding titles" : "Title lookup"}</h3>
-              <p>{catalogSearchStatus}</p>
-            </div>
-          </div>
-
-          <h2 className="visually-hidden" id="catalog-results-title">
-            Title matches
-          </h2>
-          <div className="catalog-results" aria-label="Movie and show title matches">
-            {catalogResults.map((result) => {
-              const isSelectedCatalogTitle = selectedCatalogTitle?.id === result.id;
-
-              return (
-                <button
-                  type="button"
-                  className={isSelectedCatalogTitle ? "catalog-result active" : "catalog-result"}
-                  key={result.id}
-                  onClick={() => {
-                    void chooseCatalogTitle(result);
-                  }}
-                >
-                  <span className="catalog-poster">
-                    {result.imageUrl ? <img src={result.imageUrl} alt="" loading="lazy" /> : <Clapperboard size={18} aria-hidden="true" />}
-                  </span>
-                  <span className="catalog-result-main">
-                    <strong>{result.title}</strong>
-                    <small>
-                      {[result.year, result.kind, result.credits].filter(Boolean).join(" - ")}
-                    </small>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </section>
+      {showHistory ? (
+        <HistoryPage
+          historyBusyId={historyBusyId}
+          historyError={historyError}
+          historyItems={historyItems}
+          historyState={historyState}
+          isClearingHistory={isClearingHistory}
+          formatBytes={formatBytes}
+          formatPercentage={formatPercentage}
+          onClearHistory={() => void clearHistory()}
+          onLoadHistory={() => void loadHistory()}
+          onOpenHistoryItem={(item) => void openHistoryItem(item)}
+          onRemoveHistoryItem={(item, deleteFiles) => void removeHistoryItem(item, deleteFiles)}
+        />
       ) : null}
 
-      {shouldShowSourceStatus ? (
-        <section className="discovery-panel results-panel" aria-labelledby="source-results-title">
-          <div className={`source-status source-status-${sourceSearchState}`} aria-live="polite">
-            {sourceSearchState === "searching" ? (
-              <Loader2 className="spin" size={18} aria-hidden="true" />
-            ) : sourceSearchState === "ready" ? (
-              <ListChecks size={18} aria-hidden="true" />
-            ) : (
-              <AlertTriangle size={18} aria-hidden="true" />
-            )}
-            <div>
-              <h3>{sourceSearchState === "ready" ? "Results ready" : sourceSearchState === "searching" ? "Searching" : "Source status"}</h3>
-              <p>{sourceSearchStatus}</p>
-              {sourceErrors.length > 0 && sourceResults.length > 0 ? (
-                <small>
-                  Partial source errors: {sourceErrors.map((error) => `${error.providerName}: ${error.message}`).join(" ")}
-                </small>
-              ) : null}
-            </div>
-          </div>
-
-          <h2 className="visually-hidden" id="source-results-title">
-            Source results
-          </h2>
-          <div className="source-results" aria-label="Discovered torrent sources">
-            {sourceResults.length > 0 ? (
-              sourceResults.map((result) => {
-                const resultSource = getProviderResultSource(result);
-                const isSelected = selectedSourceResultId === result.id;
-
-                return (
-                  <article className={isSelected ? "source-result active" : "source-result"} key={result.id}>
-                    <div className="source-result-main">
-                      <div className="source-result-title">
-                        <h3>{result.title}</h3>
-                        <span>{result.providerName}</span>
-                      </div>
-                      <div className="source-result-meta">
-                        <span>{result.category ?? "torrent"}</span>
-                        <span>{formatOptionalBytes(result.size)}</span>
-                        <span>{formatOptionalCount(result.seeders)} seeds</span>
-                        <span>{formatOptionalCount(result.leechers)} peers</span>
-                      </div>
-                    </div>
-                    <div className="source-result-actions">
-                      <button
-                        type="button"
-                        className="ghost-button source-load-button"
-                        disabled={!resultSource || isTorrentLoading}
-                        onClick={() => {
-                          void loadSourceResult(result);
-                        }}
-                      >
-                        {metadataState === "fetching" && isSelected ? (
-                          <Loader2 className="spin" size={16} aria-hidden="true" />
-                        ) : (
-                          <Magnet size={16} aria-hidden="true" />
-                        )}
-                        {isSelected && metadataState === "fetching" ? "Loading" : "Load"}
-                      </button>
-                    </div>
-                  </article>
-                );
-              })
-            ) : (
-              <div className="empty-files">No source results yet.</div>
-            )}
-          </div>
-        </section>
-      ) : null}
-        </>
+      {showSettings ? (
+        <SettingsDialog
+          openSubtitlesLanguage={openSubtitlesLanguage}
+          openSubtitlesLanguageOptions={openSubtitlesLanguageOptions}
+          openSubtitlesPassword={openSubtitlesPassword}
+          openSubtitlesUsername={openSubtitlesUsername}
+          subSourceApiKey={subSourceApiKey}
+          subSourceLanguage={subSourceLanguage}
+          subSourceLanguageOptions={subSourceLanguageOptions}
+          subtitleTextScale={subtitleTextScale}
+          onCloseSettings={closeSettings}
+          onOpenSubtitlesLanguageChange={setOpenSubtitlesLanguage}
+          onOpenSubtitlesPasswordChange={setOpenSubtitlesPassword}
+          onOpenSubtitlesUsernameChange={setOpenSubtitlesUsername}
+          onSubSourceApiKeyChange={setSubSourceApiKey}
+          onSubSourceLanguageChange={setSubSourceLanguage}
+          onSubtitleTextScaleChange={setSubtitleTextScale}
+        />
       ) : null}
 
-      {!showHistory && viewMode === "browse" ? (
-        <>
-          {renderSelectedTitleBar()}
-          <section className="browse-layout" aria-label="Selected title and sources">
-            <div className="browse-poster">
-              {selectedCatalogTitle?.imageUrl ? (
-                <img src={selectedCatalogTitle.imageUrl} alt={`${selectedCatalogTitle.title} poster`} />
-              ) : (
-                <Clapperboard size={48} aria-hidden="true" className="browse-poster-fallback" />
-              )}
-            </div>
-
-            <div className="browse-detail">
-              <div className="browse-detail-header">
-                <h2>
-                  {selectedCatalogTitle?.title}
-                  {selectedCatalogTitle?.year ? <span className="browse-year"> ({selectedCatalogTitle.year})</span> : null}
-                </h2>
-                <div className="browse-meta">
-                  {selectedCatalogTitle?.kind ? <span>{selectedCatalogTitle.kind}</span> : null}
-                  {selectedCatalogTitle?.id?.startsWith("tt") ? (
-                    <a href={`https://www.imdb.com/title/${selectedCatalogTitle.id}/`} target="_blank" rel="noreferrer">
-                      View on IMDb
-                    </a>
-                  ) : null}
-                </div>
-                {selectedCatalogTitle?.credits ? <p className="browse-credits">{selectedCatalogTitle.credits}</p> : null}
-              </div>
-
-              <div className="browse-sources">
-                <div className={`source-status source-status-${sourceSearchState}`} aria-live="polite">
-                  {sourceSearchState === "searching" ? (
-                    <Loader2 className="spin" size={18} aria-hidden="true" />
-                  ) : sourceSearchState === "ready" ? (
-                    <ListChecks size={18} aria-hidden="true" />
-                  ) : (
-                    <AlertTriangle size={18} aria-hidden="true" />
-                  )}
-                  <div>
-                    <h3>{sourceSearchState === "ready" ? "Available torrents" : sourceSearchState === "searching" ? "Finding torrents" : "Torrent sources"}</h3>
-                    <p>{sourceSearchStatus}</p>
-                  </div>
-                </div>
-                {renderSourceResults()}
-              </div>
-            </div>
-          </section>
-        </>
+      {!showHistory && (viewMode === "search" || viewMode === "browse") ? (
+        <SearchPage
+          catalogResults={catalogResults}
+          catalogSearchState={catalogSearchState}
+          catalogSearchStatus={catalogSearchStatus}
+          chooseCatalogTitle={(candidate) => void chooseCatalogTitle(candidate)}
+          formatOptionalBytes={formatOptionalBytes}
+          formatOptionalCount={formatOptionalCount}
+          isTorrentLoading={isTorrentLoading}
+          loadSourceResult={(result) => void loadSourceResult(result)}
+          metadataState={metadataState}
+          selectedCatalogTitle={selectedCatalogTitle}
+          selectedSourceResultId={selectedSourceResultId}
+          session={session}
+          shouldShowCatalogStatus={shouldShowCatalogStatus}
+          shouldShowSourceStatus={shouldShowSourceStatus}
+          sourceErrors={sourceErrors}
+          sourceResults={sourceResults}
+          sourceResultLocalMatches={sourceResultLocalMatches}
+          sourceSearchState={sourceSearchState}
+          sourceSearchStatus={sourceSearchStatus}
+        />
       ) : null}
 
       {!showHistory && viewMode === "player" ? (
-        <>
-          {renderSelectedTitleBar(true)}
-        <section className="player-layout" aria-label="Torrent playback workspace">
-        <div className="player-main">
-        <section
-          ref={playerPanelRef}
-          className="player-panel"
-          aria-label="Video player"
-        >
-          <div
-            className={[
-              "video-surface",
-              streamUrl ? "video-surface-active" : ""
-            ].filter(Boolean).join(" ")}
-          >
-            {streamUrl ? (
-              <div
-                key={streamUrl}
-                ref={videoJsHostRef}
-                className="torrentdock-video-js-host"
-                aria-label="Chromium FFmpeg video player"
-              />
-            ) : (
-              <div className="video-center">
-                {metadataState === "fetching" || metadataState === "starting" ? (
-                  <Loader2 className="spin" size={42} aria-hidden="true" />
-                ) : (
-                  <FileVideo size={46} aria-hidden="true" />
-                )}
-                <div>
-                  <h2>{session?.name ?? "Waiting for torrent metadata"}</h2>
-                  <p aria-live="polite">{metadataStatus}</p>
-                </div>
-              </div>
-            )}
-            {videoError ? (
-              <div className="video-error" role="alert">
-                <FileVideo size={28} aria-hidden="true" />
-                <p>{videoError}</p>
-              </div>
-            ) : null}
-          </div>
-        </section>
-
-        <div className="player-download-strip" aria-label="Torrent download progress">
-          <div className="download-strip-heading">
-            <span>{progressLabel}</span>
-            <span>{downloadSpeedLabel}</span>
-          </div>
-          <div
-            className="download-strip-track"
-            role="progressbar"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={Math.round(progressPercent)}
-            aria-label="Torrent download completion"
-          >
-            <span style={{ width: `${progressPercent}%` }} />
-          </div>
-          <div className="download-strip-meta">
-            <span>{progressBytesLabel}</span>
-            <span>{downloadProgress ? `${downloadProgress.livePeers} live peers` : `${session?.seenPeers ?? 0} seen peers`}</span>
-          </div>
-        </div>
-
-        </div>
-
-        <aside className="metadata-panel" aria-label="Metadata and files">
-          <div className="subtitle-panel">
-            <div className="panel-title">
-              <h2>Subtitles</h2>
-              <label className="ghost-button subtitle-upload">
-                <Upload size={16} aria-hidden="true" />
-                Add
-                <input type="file" accept=".srt,.vtt,text/vtt" onChange={loadSubtitleFile} />
-              </label>
-            </div>
-
-            {subtitleError ? <p className="subtitle-error">{subtitleError}</p> : null}
-
-            <form
-              className="online-subtitle-panel"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void findOnlineSubtitles();
-              }}
-            >
-              <div className="online-provider-header">
-                <button
-                  type="button"
-                  className="online-provider-toggle"
-                  aria-expanded={isSubtitleProviderExpanded}
-                  aria-label={isSubtitleProviderExpanded ? "Hide provider settings" : "Show provider settings"}
-                  onClick={() => setIsSubtitleProviderExpanded((expanded) => !expanded)}
-                >
-                  {isSubtitleProviderExpanded ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
-                </button>
-                <button
-                  type="submit"
-                  className="ghost-button online-subtitle-search-button"
-                  aria-label={onlineSubtitleSearchState === "searching" ? "Finding online subtitles" : "Find online subtitles"}
-                  disabled={onlineSubtitleSearchState === "searching" || onlineSubtitleSearchState === "loading" || !session}
-                >
-                  {onlineSubtitleSearchState === "searching" ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Search size={16} aria-hidden="true" />}
-                </button>
-              </div>
-
-              {isSubtitleProviderExpanded ? (
-                <>
-                  <div className="online-subtitle-actions">
-                    <label className="online-provider-select">
-                      Provider
-                      <select
-                        value={onlineSubtitleProvider}
-                        onChange={(event) => setOnlineSubtitleProvider(event.target.value as OnlineSubtitleProvider)}
-                      >
-                        <option value="subsource">SubSource</option>
-                        <option value="opensubtitles">OpenSubtitles.org</option>
-                      </select>
-                    </label>
-                  </div>
-
-                  <div className={`online-subtitle-fields ${onlineSubtitleProvider}-fields`}>
-                    {onlineSubtitleProvider === "subsource" ? (
-                      <>
-                        <label>
-                          SubSource API key
-                          <input
-                            type="password"
-                            value={subSourceApiKey}
-                            onChange={(event) => setSubSourceApiKey(event.target.value)}
-                            autoComplete="off"
-                            spellCheck={false}
-                          />
-                        </label>
-                        <label>
-                          Lang
-                          <select
-                            value={subSourceLanguage}
-                            onChange={(event) => setSubSourceLanguage(event.target.value)}
-                          >
-                            {subSourceLanguageOptions.map((language) => (
-                              <option key={language.value} value={language.value}>
-                                {language.label}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                      </>
-                    ) : (
-                      <>
-                        <label>
-                          OpenSubtitles.org username
-                          <input
-                            type="text"
-                            value={openSubtitlesUsername}
-                            onChange={(event) => setOpenSubtitlesUsername(event.target.value)}
-                            autoComplete="username"
-                            spellCheck={false}
-                          />
-                        </label>
-                        <label>
-                          Password
-                          <input
-                            type="password"
-                            value={openSubtitlesPassword}
-                            onChange={(event) => setOpenSubtitlesPassword(event.target.value)}
-                            autoComplete="current-password"
-                            spellCheck={false}
-                          />
-                        </label>
-                        <label>
-                          Lang
-                          <select
-                            value={openSubtitlesLanguage}
-                            onChange={(event) => setOpenSubtitlesLanguage(event.target.value)}
-                          >
-                            {openSubtitlesLanguageOptions.map((language) => (
-                              <option key={language.value} value={language.value}>
-                                {language.label}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                      </>
-                    )}
-                  </div>
-
-                  <p className="online-subtitle-help">
-                    Need access? Create a free{" "}
-                    <a href="https://subsource.net/dashboard/profile" target="_blank" rel="noreferrer">
-                      SubSource API key
-                    </a>
-                    , an{" "}
-                    <a href="https://www.opensubtitles.org/en/newuser" target="_blank" rel="noreferrer">
-                      OpenSubtitles.org account
-                    </a>
-                    , then paste the details requested above.
-                  </p>
-                </>
-              ) : null}
-            </form>
-
-            {onlineSubtitleError ? <p className="subtitle-error">{onlineSubtitleError}</p> : null}
-
-            {subtitleListCount > 0 ? (
-              <div className="subtitle-list-section">
-                <button
-                  type="button"
-                  className="subtitle-list-toggle"
-                  aria-expanded={isSubtitleListExpanded}
-                  onClick={() => setIsSubtitleListExpanded((expanded) => !expanded)}
-                >
-                  {isSubtitleListExpanded ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
-                  <span>Subtitle list</span>
-                  <small>{subtitleListCount} item{subtitleListCount === 1 ? "" : "s"}</small>
-                </button>
-
-                {isSubtitleListExpanded ? (
-                  <div className="subtitle-list-body">
-                    {onlineSubtitleResults.length > 0 ? (
-                      <div className="online-subtitle-results" aria-label="Online subtitle results">
-                        {onlineSubtitleResults.map((result) => {
-                          const isLoadingOnlineResult = onlineSubtitleLoadingResultId === result.id;
-                          const isActiveOnlineResult = activeOnlineResultId === result.id;
-                          const resultMeta = [
-                            getOnlineSubtitleProviderLabel(result.provider),
-                            result.language,
-                            result.format.toUpperCase(),
-                            result.isRawFile ? null : "ZIP",
-                            result.size ? formatBytes(result.size) : null,
-                            result.hi ? "HI" : null,
-                            result.fps ? `${result.fps} fps` : null
-                          ].filter(Boolean);
-
-                          return (
-                            <button
-                              type="button"
-                              className={isActiveOnlineResult ? "online-subtitle-result active" : "online-subtitle-result"}
-                              key={result.id}
-                              onClick={() => {
-                                void loadOnlineSubtitle(result);
-                              }}
-                              disabled={onlineSubtitleSearchState === "loading" || isLoadingOnlineResult}
-                            >
-                              {isLoadingOnlineResult ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Download size={16} aria-hidden="true" />}
-                              <span>
-                                <strong>{result.releaseName}</strong>
-                                <small>{resultMeta.join(" - ")}</small>
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-
-                    {subtitleFiles.length > 0 ? (
-                      <div className="subtitle-source-list" aria-label="Subtitle files in this torrent">
-                        {subtitleFiles.map((file) => {
-                          const fileName = getFileName(file);
-                          const isLoadingSubtitle = subtitleLoadingFileIndex === file.index;
-                          const isActiveSubtitle = subtitleFileName === fileName;
-
-                          return (
-                            <button
-                              type="button"
-                              className={isActiveSubtitle ? "subtitle-source active" : "subtitle-source"}
-                              key={`${file.index}-${file.name}`}
-                              onClick={() => {
-                                void loadSubtitleFromTorrent(file);
-                              }}
-                              disabled={isTorrentLoading || isLoadingSubtitle}
-                            >
-                              {isLoadingSubtitle ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Captions size={16} aria-hidden="true" />}
-                              <span>{fileName}</span>
-                              <small>{formatBytes(file.length)}</small>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
-            <div className="subtitle-controls" aria-label="Subtitle timing">
-              <button type="button" className="ghost-button" onClick={() => shiftSubtitle(-subtitleShiftStepSeconds)} disabled={!subtitleRawText}>
-                <StepBack size={16} aria-hidden="true" />
-                Earlier
-              </button>
-              <button
-                type="button"
-                className="ghost-button subtitle-shift-value"
-                onClick={resetSubtitleShift}
-                disabled={!subtitleRawText || subtitleOffsetSeconds === 0}
-                aria-label="Reset subtitle timing shift"
-              >
-                {formatSubtitleOffset(subtitleOffsetSeconds)}
-              </button>
-              <button type="button" className="ghost-button" onClick={() => shiftSubtitle(subtitleShiftStepSeconds)} disabled={!subtitleRawText}>
-                <StepForward size={16} aria-hidden="true" />
-                Later
-              </button>
-            </div>
-
-            {subtitleFileName ? (
-              <button type="button" className="ghost-button subtitle-remove" onClick={removeSubtitleFile}>
-                Remove subtitles
-              </button>
-            ) : null}
-          </div>
-        </aside>
-        </section>
-        </>
+        <PlayerPage
+          activeSubtitleTracks={activeSubtitleTracks}
+          activeSubtitleSourceIds={activeSubtitleSourceIds}
+          downloadProgress={downloadProgress}
+          downloadSpeedLabel={downloadSpeedLabel}
+          findOnlineSubtitles={() => void findOnlineSubtitles()}
+          formatBytes={formatBytes}
+          formatSubtitleLanguage={formatSubtitleLanguage}
+          formatSubtitleOffset={formatSubtitleOffset}
+          getFileName={getFileName}
+          getOnlineSubtitleProviderLabel={getOnlineSubtitleProviderLabel}
+          getTorrentSubtitleSourceId={getTorrentSubtitleSourceId}
+          isTorrentLoading={isTorrentLoading}
+          loadOnlineSubtitle={(candidate) => void loadOnlineSubtitle(candidate)}
+          loadSubtitleFile={loadSubtitleFile}
+          loadSubtitleFromTorrent={(file) => void loadSubtitleFromTorrent(file)}
+          makeSubtitleTrackPrimary={makeSubtitleTrackPrimary}
+          metadataState={metadataState}
+          metadataStatus={metadataStatus}
+          onlineSubtitleError={onlineSubtitleError}
+          onlineSubtitleLoadingResultId={onlineSubtitleLoadingResultId}
+          onlineSubtitleResults={onlineSubtitleResults}
+          onlineSubtitleSearchState={onlineSubtitleSearchState}
+          openSubtitlesLanguage={openSubtitlesLanguage}
+          openSubtitlesLanguageOptions={openSubtitlesLanguageOptions}
+          openSubtitlesPassword={openSubtitlesPassword}
+          openSubtitlesUsername={openSubtitlesUsername}
+          playerPanelRef={playerPanelRef}
+          playerShortcutFeedback={playerShortcutFeedback}
+          progressBytesLabel={progressBytesLabel}
+          progressLabel={progressLabel}
+          progressPercent={progressPercent}
+          removeSubtitleFile={removeSubtitleFile}
+          removeSubtitleTrack={removeSubtitleTrack}
+          resetSubtitleTrackShift={resetSubtitleTrackShift}
+          returnToSources={returnToSources}
+          selectedCatalogTitle={selectedCatalogTitle}
+          session={session}
+          setOpenSubtitlesLanguage={setOpenSubtitlesLanguage}
+          setSubSourceLanguage={setSubSourceLanguage}
+          shiftSubtitleTrack={shiftSubtitleTrack}
+          sourceQuery={sourceQuery}
+          sourceResults={sourceResults}
+          streamUrl={streamUrl}
+          subtitleError={subtitleError}
+          subtitleFiles={subtitleFiles}
+          subtitleLoadingFileIndex={subtitleLoadingFileIndex}
+          subtitleOverlayRoot={videoJsOverlayRoot}
+          subtitleShiftStepSeconds={subtitleShiftStepSeconds}
+          subtitleTracks={subtitleTracks}
+          subSourceApiKey={subSourceApiKey}
+          subSourceLanguage={subSourceLanguage}
+          subSourceLanguageOptions={subSourceLanguageOptions}
+          subtitleTextScale={subtitleTextScale}
+          setSubtitleTextScale={setSubtitleTextScale}
+          toggleSubtitleTrackVisibility={toggleSubtitleTrackVisibility}
+          videoError={videoError}
+          videoJsHostRef={videoJsHostRef}
+        />
       ) : null}
     </main>
   );

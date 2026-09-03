@@ -232,12 +232,16 @@ function normalizeTorrentResponse(response: RqbitAddTorrentResponse): RqbitAddTo
     ...response,
     details: {
       ...response.details,
-      files: response.details.files?.map((file, index) => ({
-        ...file,
-        index
-      }))
+      files: normalizeRqbitFiles(response.details.files)
     }
   };
+}
+
+function normalizeRqbitFiles(files: RqbitFile[] | undefined): RqbitFile[] | undefined {
+  return files?.map((file, index) => ({
+    ...file,
+    index
+  }));
 }
 
 export function escapeRegex(value: string) {
@@ -490,6 +494,16 @@ export async function listLibraryTorrents(apiBase?: string): Promise<LibraryTorr
       };
     })
   );
+}
+
+export async function getLibraryTorrentDetails(torrentId: number, apiBase?: string): Promise<RqbitTorrentDetails> {
+  const response = await fetchWithTimeout(`${apiBase ?? DEFAULT_API_BASE}/torrents/${torrentId}`, undefined, DEFAULT_PROBE_REQUEST_TIMEOUT_MS);
+  const details = await parseJsonResponse<RqbitTorrentDetails>(response);
+
+  return {
+    ...details,
+    files: normalizeRqbitFiles(details.files)
+  };
 }
 
 // Stops the engine from downloading/seeding a torrent without removing it, so

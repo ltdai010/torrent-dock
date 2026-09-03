@@ -1,0 +1,23 @@
+.player-app {
+  width: 100%;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0 auto;
+  padding: 0 var(--space-4) var(--space-7);
+}
+
+.player-app > :not(.topbar) {
+  width: 100%;
+  max-width: var(--page-max-width);
+  margin-right: auto;
+  margin-left: auto;
+}
+
+@media (max-width: 920px) {
+  .player-app {
+    max-width: var(--search-max-width);
+    padding: 0 var(--space-2-5) var(--space-7);
+  }
+}

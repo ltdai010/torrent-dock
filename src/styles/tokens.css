@@ -1,0 +1,113 @@
+:root {
+  --bg: #ffffff;
+  --surface: var(--color-panel-solid);
+  --surface-soft: var(--gray-2);
+  --text: #0f0f0f;
+  --muted: #606060;
+  --line: #e5e5e5;
+  --primary: #ff0033;
+  --primary-strong: #cc0029;
+  --primary-soft: #ffe8ee;
+  --info: var(--blue-11);
+  --info-soft: var(--blue-3);
+  --warning: var(--amber-11);
+  --warning-soft: var(--amber-3);
+  --danger: var(--red-11);
+  --danger-soft: var(--red-3);
+  --radius-control: var(--radius-3);
+  --radius-panel: var(--radius-4);
+  --radius-pill: 999px;
+  --space-px: 1px;
+  --space-0-5: 2px;
+  --space-1: 4px;
+  --space-1-5: 6px;
+  --space-2: 8px;
+  --space-2-5: 10px;
+  --space-3: 12px;
+  --space-3-5: 14px;
+  --space-4: 16px;
+  --space-4-5: 18px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --control-height-md: 40px;
+  --control-height-lg: 42px;
+  --control-width-search-action: 64px;
+  --thumb-catalog-width: 76px;
+  --thumb-catalog-height: 104px;
+  --thumb-detail-width: 124px;
+  --thumb-detail-width-compact: 96px;
+  --page-max-width: 1280px;
+  --search-max-width: 720px;
+  --dialog-max-width: 960px;
+  --dialog-max-height: 760px;
+  --screen-min-width: 320px;
+  --subtitle-list-max-height: 220px;
+  --shortcut-feedback-min-width: 82px;
+  --video-min-height: 520px;
+  --video-min-height-tablet: 360px;
+  --video-min-height-mobile: 300px;
+  --player: #0f0f0f;
+  --player-soft: #212121;
+  color: var(--text);
+  background: var(--bg);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: var(--screen-min-width);
+  min-height: 100vh;
+}
+
+button,
+textarea,
+input,
+select {
+  font: inherit;
+}
+
+button:focus-visible {
+  outline: 3px solid rgba(255, 0, 51, 0.28);
+  outline-offset: 2px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
+}
