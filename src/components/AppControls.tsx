@@ -37,6 +37,13 @@ type AppPageHeaderProps = {
   actions?: ReactNode;
 };
 
+type AppSidebarItem = {
+  label: string;
+  icon: ReactNode;
+  active?: boolean;
+  onClick: () => void;
+};
+
 type AppTopBarProps = {
   title: ReactNode;
   search?: ReactNode;
@@ -96,6 +103,25 @@ export function AppTopBar({ title, search, actions }: AppTopBarProps) {
       {search ? <div className="topbar-search">{search}</div> : null}
       {actions ? <Flex align="center" justify="end" gap="2" wrap="wrap">{actions}</Flex> : null}
     </header>
+  );
+}
+
+export function AppSidebar({ items }: { items: AppSidebarItem[] }) {
+  return (
+    <nav className="app-sidebar" aria-label="Primary">
+      {items.map((item) => (
+        <button
+          type="button"
+          className={item.active ? "app-sidebar-item active" : "app-sidebar-item"}
+          aria-current={item.active ? "page" : undefined}
+          onClick={item.onClick}
+          key={item.label}
+        >
+          {item.icon}
+          <span>{item.label}</span>
+        </button>
+      ))}
+    </nav>
   );
 }
 

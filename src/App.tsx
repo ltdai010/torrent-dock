@@ -10,7 +10,7 @@ import {
   Loader2,
   Magnet,
   Search,
-  Settings,
+  Settings
 } from "lucide-react";
 import {
   getLibraryTorrentDetails,
@@ -39,7 +39,7 @@ import { formatMovieSearchTitle, sanitizeMediaSearchTitle, searchMovieTitles, ty
 import { downloadSubSourceSubtitle, searchSubSourceSubtitles, type SubSourceSubtitleCandidate } from "./services/subsource";
 import { dedupeProviderResults, getProviderResultSource, searchTorrentSources } from "./services/torrentSources";
 import type { ProviderResult, ProviderSearchError } from "./domain/torrent";
-import { AppHeaderSearch, AppTopBar } from "./components/AppControls";
+import { AppHeaderSearch, AppSidebar, AppTopBar } from "./components/AppControls";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Button } from "./components/ui";
 import { HistoryPage } from "./pages/HistoryPage";
@@ -2239,41 +2239,45 @@ function App() {
             ) : null}
           />
         }
-        actions={
-          <>
-          <Button
-            type="button"
-            variant={showSettings ? "soft" : "surface"}
-            color="gray"
-            onClick={() => {
-              if (showSettings) {
-                closeSettings();
-              } else {
-                openSettings();
-              }
-            }}
-          >
-            <Settings size={16} aria-hidden="true" />
-            Settings
-          </Button>
-          <Button
-            type="button"
-            variant={showHistory ? "soft" : "surface"}
-            color="gray"
-            onClick={() => {
-              if (showHistory) {
-                closeHistory();
-              } else {
+      />
+
+      <div className="app-workspace">
+        <AppSidebar
+          items={[
+            {
+              label: "Search",
+              icon: <Search size={21} aria-hidden="true" />,
+              active: !showHistory,
+              onClick: closeHistory
+            },
+            {
+              label: "Downloads",
+              icon: <History size={21} aria-hidden="true" />,
+              active: showHistory,
+              onClick: () => {
+                if (showHistory) {
+                  return;
+                }
+
                 void openHistory();
               }
-            }}
-          >
-            <History size={16} aria-hidden="true" />
-            History
-          </Button>
-          </>
-        }
-      />
+            },
+            {
+              label: "Settings",
+              icon: <Settings size={21} aria-hidden="true" />,
+              active: showSettings,
+              onClick: () => {
+                if (showSettings) {
+                  closeSettings();
+                } else {
+                  openSettings();
+                }
+              }
+            }
+          ]}
+        />
+
+        <div className="app-content">
 
       {showHistory ? (
         <HistoryPage
@@ -2396,6 +2400,8 @@ function App() {
           videoJsHostRef={videoJsHostRef}
         />
       ) : null}
+        </div>
+      </div>
     </main>
   );
 }

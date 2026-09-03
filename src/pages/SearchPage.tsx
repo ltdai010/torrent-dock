@@ -46,6 +46,18 @@ function SearchStatus({
   state: CatalogSearchState | SourceSearchState;
   children?: ReactNode;
 }) {
+  if (state === "ready") {
+    return (
+      <Flex align="center" justify="between" gap="3" wrap="wrap" aria-live="polite">
+        <Flex direction="column" gap="1">
+          <Heading as="h2" size="4">{title}</Heading>
+          <Text as="span" size="2" color="gray">{message}</Text>
+        </Flex>
+        {children ? <div>{children}</div> : null}
+      </Flex>
+    );
+  }
+
   return (
     <Callout.Root color={statusColor(state)} variant="surface" aria-live="polite">
       <Callout.Icon>{icon}</Callout.Icon>
@@ -87,79 +99,74 @@ export function SearchPage({
 }: SearchPageProps) {
   if (selectedCatalogTitle) {
     return (
-      <Card size="2">
-        <Grid asChild columns={{ initial: "1", sm: "124px minmax(0, 1fr)" }} gap="4" align="start">
-          <section aria-label="Selected title and sources">
-            <div className="browse-poster">
-              {selectedCatalogTitle.imageUrl ? (
-                <img src={selectedCatalogTitle.imageUrl} alt={`${selectedCatalogTitle.title} poster`} />
-              ) : (
-                <Clapperboard size={48} aria-hidden="true" />
-              )}
-            </div>
+      <Grid asChild columns={{ initial: "1", sm: "124px minmax(0, 1fr)" }} gap="4" align="start">
+        <section aria-label="Selected title and sources">
+          <div className="browse-poster">
+            {selectedCatalogTitle.imageUrl ? (
+              <img src={selectedCatalogTitle.imageUrl} alt={`${selectedCatalogTitle.title} poster`} />
+            ) : (
+              <Clapperboard size={48} aria-hidden="true" />
+            )}
+          </div>
 
+          <Flex direction="column" gap="3">
             <Flex direction="column" gap="3">
-              <Flex direction="column" gap="3">
-                <Heading as="h2" size="5">
-                  {selectedCatalogTitle.title}
-                  {selectedCatalogTitle.year ? ` (${selectedCatalogTitle.year})` : null}
-                </Heading>
-                <Flex gap="2" align="center" wrap="wrap">
-                  {selectedCatalogTitle.kind ? <Badge color="blue" variant="soft">{selectedCatalogTitle.kind}</Badge> : null}
-                  {selectedCatalogTitle.id?.startsWith("tt") ? (
-                    <a href={`https://www.imdb.com/title/${selectedCatalogTitle.id}/`} target="_blank" rel="noreferrer">
-                      View on IMDb
-                    </a>
-                  ) : null}
-                </Flex>
-                {selectedCatalogTitle.credits ? <Text as="p" color="gray">{selectedCatalogTitle.credits}</Text> : null}
+              <Heading as="h2" size="5">
+                {selectedCatalogTitle.title}
+                {selectedCatalogTitle.year ? ` (${selectedCatalogTitle.year})` : null}
+              </Heading>
+              <Flex gap="2" align="center" wrap="wrap">
+                {selectedCatalogTitle.kind ? <Badge color="blue" variant="soft">{selectedCatalogTitle.kind}</Badge> : null}
+                {selectedCatalogTitle.id?.startsWith("tt") ? (
+                  <a href={`https://www.imdb.com/title/${selectedCatalogTitle.id}/`} target="_blank" rel="noreferrer">
+                    View on IMDb
+                  </a>
+                ) : null}
               </Flex>
-
-              <SearchStatus
-                state={sourceSearchState}
-                icon={sourceSearchState === "searching" ? <Loader2 className="spin" size={18} aria-hidden="true" /> : sourceSearchState === "ready" ? <ListChecks size={18} aria-hidden="true" /> : <AlertTriangle size={18} aria-hidden="true" />}
-                title={sourceSearchState === "ready" ? "Available torrents" : sourceSearchState === "searching" ? "Finding torrents" : "Torrent sources"}
-                message={sourceSearchStatus}
-              />
-              <SourceResults
-                metadataState={metadataState}
-                selectedSourceResultId={selectedSourceResultId}
-                session={session}
-                sourceResults={sourceResults}
-                sourceResultLocalMatches={sourceResultLocalMatches}
-                isTorrentLoading={isTorrentLoading}
-                formatOptionalBytes={formatOptionalBytes}
-                formatOptionalCount={formatOptionalCount}
-                onLoadSourceResult={loadSourceResult}
-              />
+              {selectedCatalogTitle.credits ? <Text as="p" color="gray">{selectedCatalogTitle.credits}</Text> : null}
             </Flex>
-          </section>
-        </Grid>
-      </Card>
+
+            <SearchStatus
+              state={sourceSearchState}
+              icon={sourceSearchState === "searching" ? <Loader2 className="spin" size={18} aria-hidden="true" /> : sourceSearchState === "ready" ? <ListChecks size={18} aria-hidden="true" /> : <AlertTriangle size={18} aria-hidden="true" />}
+              title={sourceSearchState === "ready" ? "Available torrents" : sourceSearchState === "searching" ? "Finding torrents" : "Torrent sources"}
+              message={sourceSearchStatus}
+            />
+            <SourceResults
+              metadataState={metadataState}
+              selectedSourceResultId={selectedSourceResultId}
+              session={session}
+              sourceResults={sourceResults}
+              sourceResultLocalMatches={sourceResultLocalMatches}
+              isTorrentLoading={isTorrentLoading}
+              formatOptionalBytes={formatOptionalBytes}
+              formatOptionalCount={formatOptionalCount}
+              onLoadSourceResult={loadSourceResult}
+            />
+          </Flex>
+        </section>
+      </Grid>
     );
   }
 
   if (!shouldShowCatalogStatus && !shouldShowSourceStatus) {
     return (
-      <Card size="2">
-        <Flex asChild minHeight="calc(100dvh - 120px)" align="center" justify="center" p="9">
-          <section aria-label="Search start">
-            <Flex direction="column" align="center" gap="2">
-              <Search size={34} aria-hidden="true" />
-              <Text as="p" color="gray" align="center">Search for a movie, show, or magnet link from the top bar.</Text>
-            </Flex>
-          </section>
-        </Flex>
-      </Card>
+      <Flex asChild minHeight="calc(100dvh - 160px)" align="center" justify="center" p="9">
+        <section aria-label="Search start">
+          <Flex direction="column" align="center" gap="2">
+            <Search size={34} aria-hidden="true" />
+            <Text as="p" color="gray" align="center">Search for a movie, show, or magnet link from the top bar.</Text>
+          </Flex>
+        </section>
+      </Flex>
     );
   }
 
   return (
     <>
       {shouldShowCatalogStatus ? (
-        <Card asChild>
-          <section aria-labelledby="catalog-results-title">
-            <Flex direction="column" gap="3">
+        <section aria-labelledby="catalog-results-title">
+          <Flex direction="column" gap="3">
           <SearchStatus
             state={catalogSearchState}
             icon={catalogSearchState === "searching" ? <Loader2 className="spin" size={18} aria-hidden="true" /> : catalogSearchState === "ready" ? <Clapperboard size={18} aria-hidden="true" /> : <AlertTriangle size={18} aria-hidden="true" />}
@@ -190,15 +197,13 @@ export function SearchPage({
               </Card>
             ))}
           </Flex>
-            </Flex>
-          </section>
-        </Card>
+          </Flex>
+        </section>
       ) : null}
 
       {shouldShowSourceStatus ? (
-        <Card asChild>
-          <section aria-labelledby="source-results-title">
-            <Flex direction="column" gap="3">
+        <section aria-labelledby="source-results-title">
+          <Flex direction="column" gap="3">
           <SearchStatus
             state={sourceSearchState}
             icon={sourceSearchState === "searching" ? <Loader2 className="spin" size={18} aria-hidden="true" /> : sourceSearchState === "ready" ? <ListChecks size={18} aria-hidden="true" /> : <AlertTriangle size={18} aria-hidden="true" />}
@@ -224,9 +229,8 @@ export function SearchPage({
             formatOptionalCount={formatOptionalCount}
             onLoadSourceResult={loadSourceResult}
           />
-            </Flex>
-          </section>
-        </Card>
+          </Flex>
+        </section>
       ) : null}
     </>
   );
